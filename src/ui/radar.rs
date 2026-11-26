@@ -111,9 +111,15 @@ fn render_matrix(frame: &mut Frame, app: &mut App, area: Rect, prefix: [u8; 3], 
     );
     lx += 2;
     let legend = Line::from(vec![
-        Span::styled("◈ ", Style::default().fg(pal.moon_violet)),
+        Span::styled(
+            format!("{} ", DeviceRole::ThisMachine.icon()),
+            Style::default().fg(pal.moon_violet),
+        ),
         Span::styled("Self  ", Style::default().fg(pal.text_dim)),
-        Span::styled("⬡ ", Style::default().fg(pal.veil_peach)),
+        Span::styled(
+            format!("{} ", DeviceRole::Gateway.icon()),
+            Style::default().fg(pal.veil_peach),
+        ),
         Span::styled("GW  ", Style::default().fg(pal.text_dim)),
         Span::styled("● ", Style::default().fg(pal.ok)),
         Span::styled("Trusted  ", Style::default().fg(pal.text_dim)),

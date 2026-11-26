@@ -50,11 +50,11 @@ impl Tab {
 
     pub const fn icon(self) -> &'static str {
         match self {
-            Self::Hosts => "◉",
+            Self::Hosts => "●",
             Self::Radar => "⊞",
             Self::Network => "⇄",
             Self::Watch => "◈",
-            Self::Settings => "⚙",
+            Self::Settings => "◆",
         }
     }
 
@@ -171,6 +171,7 @@ pub struct App {
     pub engine_rx: mpsc::UnboundedReceiver<EngineEvent>,
     pub last_telemetry_at: Instant,
     pub telemetry_cycle: u64,
+    telemetry_inflight: bool,
     prev_online_set: HashSet<Ipv4Addr>,
     prev_open_ports: HashMap<Ipv4Addr, HashSet<u16>>,
 }
@@ -285,6 +286,7 @@ impl App {
             engine_rx,
             last_telemetry_at: Instant::now(),
             telemetry_cycle: 0,
+            telemetry_inflight: false,
             prev_online_set: HashSet::new(),
             prev_open_ports: HashMap::new(),
         };
@@ -300,13 +302,13 @@ impl App {
 
     fn save_config(&self) {
         if self.persist_state {
-            self.save_config();
+            let _ = self.config.save();
         }
     }
 
     fn save_known_hosts(&self) {
         if self.persist_state {
-            self.save_known_hosts();
+            let _ = self.known_hosts.save();
         }
     }
 
@@ -583,7 +585,7 @@ impl App {
                 if h.trusted {
                     "Trusted ★"
                 } else {
-                    "Untrusted ☆"
+                    "Untrusted !"
                 }
             ));
         }
@@ -608,35 +610,68 @@ impl App {
         Ok(path)
     }
 
-    pub fn on_tick(&mut self) {
+    /// Advances background engine events, animations, and periodic telemetry; returns `true` when UI should redraw.
+    pub fn on_tick(&mut self) -> bool {
+        let mut dirty = false;
         self.tick_count = self.tick_count.wrapping_add(1);
         if let Some((_, until)) = &self.toast {
             if Instant::now() >= *until {
                 self.toast = None;
+                dirty = true;
             }
         }
         if let Some(until) = self.splash_until {
             if Instant::now() >= until {
                 self.splash_until = None;
+                dirty = true;
+            } else if self.config.animations {
+                dirty = true;
             }
         }
 
         while let Ok(ev) = self.engine_rx.try_recv() {
             self.apply_engine_event(ev);
+            dirty = true;
         }
 
-        if self.last_telemetry_at.elapsed() >= Duration::from_secs(1) {
+        if self.scan_progress.active && self.config.animations {
+            dirty = true;
+        }
+
+        let interval = if self.demo_mode {
+            Duration::from_secs(1)
+        } else {
+            Duration::from_millis(1500)
+        };
+        if self.last_telemetry_at.elapsed() >= interval {
             let dt = self.last_telemetry_at.elapsed().as_secs_f64();
             self.last_telemetry_at = Instant::now();
             self.telemetry_cycle += 1;
 
             if self.demo_mode {
                 tick_demo_snapshot(&mut self.snapshot, self.tick_count);
-            } else {
-                self.snapshot.interfaces = collect_interfaces(&self.snapshot.interfaces, dt);
-                let resolve_pids = self.telemetry_cycle.is_multiple_of(2);
-                self.snapshot.local_sockets = collect_local_sockets(resolve_pids);
-                refresh_in_use_from_sockets(&mut self.snapshot);
+                dirty = true;
+            } else if !self.telemetry_inflight {
+                if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                    self.telemetry_inflight = true;
+                    let prev_ifaces = self.snapshot.interfaces.clone();
+                    let resolve_pids = self.telemetry_cycle.is_multiple_of(2);
+                    let tx = self.engine_tx.clone();
+                    rt.spawn_blocking(move || {
+                        let interfaces = collect_interfaces(&prev_ifaces, dt);
+                        let local_sockets = collect_local_sockets(resolve_pids);
+                        let _ = tx.send(EngineEvent::TelemetryUpdate {
+                            interfaces,
+                            local_sockets,
+                        });
+                    });
+                } else {
+                    self.snapshot.interfaces = collect_interfaces(&self.snapshot.interfaces, dt);
+                    let resolve_pids = self.telemetry_cycle.is_multiple_of(2);
+                    self.snapshot.local_sockets = collect_local_sockets(resolve_pids);
+                    refresh_in_use_from_sockets(&mut self.snapshot);
+                    dirty = true;
+                }
             }
         }
 
@@ -647,7 +682,10 @@ impl App {
         {
             self.last_watch_scan = Instant::now();
             self.start_scan(None);
+            dirty = true;
         }
+
+        dirty
     }
 
     fn apply_engine_event(&mut self, ev: EngineEvent) {
@@ -731,6 +769,15 @@ impl App {
             }
             EngineEvent::TraceComplete => {
                 self.trace_running = false;
+            }
+            EngineEvent::TelemetryUpdate {
+                interfaces,
+                local_sockets,
+            } => {
+                self.telemetry_inflight = false;
+                self.snapshot.interfaces = interfaces;
+                self.snapshot.local_sockets = local_sockets;
+                refresh_in_use_from_sockets(&mut self.snapshot);
             }
             EngineEvent::StatusToast(msg) => self.set_toast(msg),
         }
@@ -1006,24 +1053,34 @@ impl App {
         }
     }
 
-    /// Handles mouse clicks, hover movement, and scroll wheel events.
-    pub fn handle_mouse(&mut self, mouse: MouseEvent) {
-        self.hover = Some((mouse.column, mouse.row));
+    /// Handles mouse clicks, hover movement, and scroll wheel events; returns `true` if redraw is needed.
+    pub fn handle_mouse(&mut self, mouse: MouseEvent) -> bool {
+        let pos = (mouse.column, mouse.row);
+        let moved = self.hover != Some(pos);
+        self.hover = Some(pos);
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if self.splash_until.is_some() {
                     self.splash_until = None;
-                    return;
+                    return true;
                 }
                 self.search_focused = false;
                 self.socket_search_focused = false;
                 if let Some(action) = self.hits.hit_test(mouse.column, mouse.row) {
                     self.handle_click_action(action);
                 }
+                true
             }
-            MouseEventKind::ScrollUp => self.handle_scroll(mouse.column, mouse.row, -2),
-            MouseEventKind::ScrollDown => self.handle_scroll(mouse.column, mouse.row, 2),
-            _ => {}
+            MouseEventKind::ScrollUp => {
+                self.handle_scroll(mouse.column, mouse.row, -2);
+                true
+            }
+            MouseEventKind::ScrollDown => {
+                self.handle_scroll(mouse.column, mouse.row, 2);
+                true
+            }
+            MouseEventKind::Moved | MouseEventKind::Drag(_) => moved,
+            _ => false,
         }
     }
 

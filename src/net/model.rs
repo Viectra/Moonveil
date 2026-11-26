@@ -213,12 +213,12 @@ impl DeviceRole {
     pub const fn icon(self) -> &'static str {
         match self {
             Self::ThisMachine => "◈",
-            Self::Gateway => "⬡",
-            Self::Server => "▣",
-            Self::Workstation => "▢",
-            Self::Mobile => "▮",
-            Self::IoT => "◎",
-            Self::Container => "⬢",
+            Self::Gateway => "▲",
+            Self::Server => "■",
+            Self::Workstation => "◆",
+            Self::Mobile => "▪",
+            Self::IoT => "•",
+            Self::Container => "⊞",
             Self::Host => "●",
         }
     }

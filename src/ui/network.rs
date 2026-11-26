@@ -78,7 +78,7 @@ fn render_interfaces_panel(frame: &mut Frame, app: &mut App, area: Rect, pal: Pa
         } else {
             pal.surface
         };
-        let state_dot = if iface.is_up { "●" } else { "○" };
+        let state_dot = if iface.is_up { "●" } else { "·" };
         let state_col = if iface.is_up { pal.ok } else { pal.text_muted };
         let line = Line::from(vec![
             Span::styled(

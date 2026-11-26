@@ -47,6 +47,10 @@ pub enum EngineEvent {
     },
     TraceHop(TracerouteHop),
     TraceComplete,
+    TelemetryUpdate {
+        interfaces: Vec<NetworkInterface>,
+        local_sockets: Vec<LocalSocket>,
+    },
     StatusToast(String),
 }
 

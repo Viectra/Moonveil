@@ -110,7 +110,7 @@ fn render_toolbar(frame: &mut Frame, app: &mut App, area: Rect, pal: Palette) {
     let scan_lbl = if app.scan_progress.active {
         " ■ Stop "
     } else {
-        " ⟳ Scan "
+        " ▶ Scan "
     };
     x = push_pill(
         frame,
@@ -142,7 +142,7 @@ fn render_toolbar(frame: &mut Frame, app: &mut App, area: Rect, pal: Palette) {
     let watch_lbl = if app.watch_mode {
         " ● Watch ON "
     } else {
-        " ○ Watch "
+        " - Watch "
     };
     let _ = push_pill(
         frame,
@@ -353,7 +353,7 @@ fn render_host_row(
 ) {
     let mut spans: Vec<Span> = Vec::new();
     let status_dot = if !host.online {
-        Span::styled(" ○ ", Style::default().fg(pal.text_muted).bg(bg))
+        Span::styled(" · ", Style::default().fg(pal.text_muted).bg(bg))
     } else if !host.trusted {
         Span::styled(" ● ", Style::default().fg(pal.crit).bg(bg))
     } else {
@@ -487,7 +487,7 @@ fn render_inspector(frame: &mut Frame, app: &mut App, area: Rect, pal: Palette) 
     let trust_lbl = if host.trusted {
         "★ Trusted"
     } else {
-        "☆ Untrusted"
+        "! Untrusted"
     };
     let trust_col = if host.trusted { pal.ok } else { pal.crit };
     let body = draw_card_header(
@@ -502,12 +502,8 @@ fn render_inspector(frame: &mut Frame, app: &mut App, area: Rect, pal: Palette) 
     }
 
     // Register clickable Trust badge on top right of card header
-    let hdr_trust = Rect::new(
-        area.right().saturating_sub(trust_lbl.len() as u16 + 2),
-        area.y,
-        trust_lbl.len() as u16 + 2,
-        1,
-    );
+    let trust_w = unicode_width::UnicodeWidthStr::width(trust_lbl) as u16 + 2;
+    let hdr_trust = Rect::new(area.right().saturating_sub(trust_w), area.y, trust_w, 1);
     app.hits
         .register(hdr_trust, ClickAction::ToggleTrusted(host.ip));
 
@@ -686,7 +682,7 @@ fn render_inspector(frame: &mut Frame, app: &mut App, area: Rect, pal: Palette) 
         let st_col = pal.port_color(p.state);
         let mut spans = vec![
             Span::styled(
-                format!("{:<7}", p.state.label()),
+                format!("{:<9}", p.state.label()),
                 Style::default()
                     .fg(st_col)
                     .bg(pal.surface)
@@ -694,13 +690,13 @@ fn render_inspector(frame: &mut Frame, app: &mut App, area: Rect, pal: Palette) 
             ),
             Span::styled(
                 format!(
-                    "{:<6}",
+                    "{:<10}",
                     format!("{}/{}", p.port, p.proto.label().to_ascii_lowercase())
                 ),
                 Style::default().fg(pal.text).bg(pal.surface),
             ),
             Span::styled(
-                format!("{:<11}", truncate_str(&p.service, 10)),
+                format!("{:<12}", truncate_str(&p.service, 11)),
                 Style::default().fg(pal.veil_peach).bg(pal.surface),
             ),
         ];
@@ -724,7 +720,7 @@ fn render_inspector(frame: &mut Frame, app: &mut App, area: Rect, pal: Palette) 
         } else {
             p.banner.clone().unwrap_or_else(|| p.description.clone())
         };
-        let rem_w = ports_rect.width.saturating_sub(25) as usize;
+        let rem_w = ports_rect.width.saturating_sub(31) as usize;
         spans.push(Span::styled(
             truncate_str(&extra, rem_w),
             Style::default().fg(pal.text_dim).bg(pal.surface),
@@ -789,7 +785,7 @@ fn render_inspector(frame: &mut Frame, app: &mut App, area: Rect, pal: Palette) 
             ax,
             act_area.y,
             act_area.right(),
-            " ⤳ Trace ",
+            " → Trace ",
             false,
             pal,
             ClickAction::LaunchTraceroute(host.ip),
@@ -801,7 +797,7 @@ fn render_inspector(frame: &mut Frame, app: &mut App, area: Rect, pal: Palette) 
             ax,
             act_area.y,
             act_area.right(),
-            " ⟳ Deep ",
+            " ▶ Deep ",
             false,
             pal,
             ClickAction::DeepScanHost(host.ip),
@@ -813,7 +809,7 @@ fn render_inspector(frame: &mut Frame, app: &mut App, area: Rect, pal: Palette) 
             ax,
             act_area.y,
             act_area.right(),
-            " ⏻ WoL ",
+            " ▲ WoL ",
             false,
             pal,
             ClickAction::SendWol(host.ip),
@@ -827,7 +823,7 @@ fn render_inspector(frame: &mut Frame, app: &mut App, area: Rect, pal: Palette) 
             bx,
             by,
             act_area.right(),
-            " ✎ Rename ",
+            " * Rename ",
             false,
             pal,
             ClickAction::OpenRenameModal(host.ip),
@@ -839,7 +835,7 @@ fn render_inspector(frame: &mut Frame, app: &mut App, area: Rect, pal: Palette) 
             bx,
             by,
             act_area.right(),
-            " ⎘ Copy IP ",
+            " + Copy IP ",
             false,
             pal,
             ClickAction::CopyText("IP".to_string(), host.ip.to_string()),
@@ -852,7 +848,7 @@ fn render_inspector(frame: &mut Frame, app: &mut App, area: Rect, pal: Palette) 
                 bx,
                 by,
                 act_area.right(),
-                " ⎘ Copy MAC ",
+                " + Copy MAC ",
                 false,
                 pal,
                 ClickAction::CopyText("MAC".to_string(), format_mac(mac)),

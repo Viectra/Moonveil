@@ -171,7 +171,7 @@ fn render_scan_settings(frame: &mut Frame, app: &mut App, area: Rect, pal: Palet
             if app.config.grab_banners {
                 " ● Banners ON "
             } else {
-                " ○ Banners OFF "
+                " - Banners OFF "
             },
             app.config.grab_banners,
             pal,
@@ -187,7 +187,7 @@ fn render_scan_settings(frame: &mut Frame, app: &mut App, area: Rect, pal: Palet
             if app.config.show_virtual_ifaces {
                 " ● Show Virtual (lo/veth) "
             } else {
-                " ○ Hide Virtual (lo/veth) "
+                " - Hide Virtual (lo/veth) "
             },
             app.config.show_virtual_ifaces,
             pal,
@@ -293,7 +293,7 @@ fn render_appearance_settings(frame: &mut Frame, app: &mut App, area: Rect, pal:
             if app.config.animations {
                 " ● Animations ON "
             } else {
-                " ○ Animations OFF "
+                " - Animations OFF "
             },
             app.config.animations,
             pal,
@@ -309,7 +309,7 @@ fn render_appearance_settings(frame: &mut Frame, app: &mut App, area: Rect, pal:
             if app.config.splash {
                 " ● Splash ON "
             } else {
-                " ○ Splash OFF "
+                " - Splash OFF "
             },
             app.config.splash,
             pal,

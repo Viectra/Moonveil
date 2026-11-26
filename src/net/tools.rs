@@ -226,7 +226,11 @@ pub fn copy_osc52(text: &str) {
     use std::io::Write;
     let b64 = encode_base64(text.as_bytes());
     let mut out = std::io::stdout().lock();
-    let _ = write!(out, "\x1b]52;c;{b64}\x07");
+    if std::env::var_os("TMUX").is_some_and(|v| !v.is_empty()) {
+        let _ = write!(out, "\x1bPtmux;\x1b\x1b]52;c;{b64}\x07\x1b\\");
+    } else {
+        let _ = write!(out, "\x1b]52;c;{b64}\x07");
+    }
     let _ = out.flush();
 }
 

@@ -71,7 +71,7 @@ fn render_export_bar(frame: &mut Frame, app: &mut App, area: Rect, pal: Palette)
             if app.watch_mode {
                 "● Watching"
             } else {
-                "○ Idle"
+                "- Idle"
             },
             if app.watch_mode {
                 pal.ok
@@ -240,7 +240,7 @@ fn render_saved_hosts(frame: &mut Frame, app: &mut App, area: Rect, pal: Palette
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(
-                    if entry.trusted { "★ " } else { "☆ " },
+                    if entry.trusted { "★ " } else { "! " },
                     Style::default()
                         .fg(if entry.trusted {
                             pal.ok
@@ -270,7 +270,7 @@ fn render_saved_hosts(frame: &mut Frame, app: &mut App, area: Rect, pal: Palette
             let wol_h = HitRegistry::is_hovered(wol_rect, app.hover);
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
-                    " ⏻ WoL ",
+                    " ▲ WoL ",
                     pal.pill_style(false, wol_h),
                 ))),
                 wol_rect,

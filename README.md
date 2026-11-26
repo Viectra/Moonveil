@@ -71,11 +71,11 @@ mvl [OPTIONS]
 | --- | --- | --- |
 | Switch views | Click sidebar / topbar tab | `1`–`5` or `Tab` / `Shift+Tab` |
 | Toggle Normal / Advanced | Click `Normal ──● Advanced` | `m` |
-| Start / Stop scan | Click `⟳ Scan` / `■ Stop` | `s` |
+| Start / Stop scan | Click `▶ Scan` / `■ Stop` | `s` |
 | Cycle port preset | Click preset pill | `p` |
 | Search & smart filter | Click search bar | `/` (`port:22`, `state:in-use`, `state:closed`, `vendor:apple`) |
 | Toggle Watch Mode | Click `Watch` pill | `w` |
-| Trust / Rename device | Click `★ Trusted` or `✎ Rename` | `t` / `n` |
+| Trust / Rename device | Click `★ Trusted` or `* Rename` | `t` / `n` |
 | Navigate & scroll | Click / Wheel scroll | `↑` `↓` / `j` `k` |
 | Export JSON | Click `Export JSON` | `e` |
 | Help / Quit | Click `? Help` / `× Quit` | `?` / `q` or `Ctrl+C` |

@@ -1,9 +1,10 @@
 //! Persistent configuration (`~/.config/moonveil/config.toml`) and known/trusted host store.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::fs;
 use std::net::Ipv4Addr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -37,6 +38,16 @@ impl ThemeId {
             Self::Abyss => "Deep Abyss",
             Self::Graphite => "Graphite",
             Self::Terminal => "Terminal",
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Moonveil => "moonveil",
+            Self::Obsidian => "obsidian",
+            Self::Abyss => "abyss",
+            Self::Graphite => "graphite",
+            Self::Terminal => "terminal",
         }
     }
 
@@ -86,6 +97,17 @@ impl AccentId {
         }
     }
 
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Violet => "violet",
+            Self::Peach => "peach",
+            Self::Cyan => "cyan",
+            Self::Mint => "mint",
+            Self::Rose => "rose",
+            Self::Amber => "amber",
+        }
+    }
+
     pub fn from_cli(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "violet" | "moon" => Some(Self::Violet),
@@ -100,7 +122,7 @@ impl AccentId {
 }
 
 /// Application preferences persisted to `~/.config/moonveil/config.toml`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub mode: ScanMode,
@@ -138,6 +160,11 @@ impl Default for Config {
 
 impl Config {
     pub fn config_dir() -> PathBuf {
+        if let Ok(custom) = std::env::var("MOONVEIL_CONFIG_DIR") {
+            if !custom.is_empty() {
+                return PathBuf::from(custom);
+            }
+        }
         if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
             if !xdg.is_empty() {
                 return PathBuf::from(xdg).join("moonveil");
@@ -174,24 +201,66 @@ impl Config {
     }
 
     pub fn load() -> Self {
-        let path = Self::config_path();
-        let Ok(raw) = fs::read_to_string(&path) else {
+        Self::load_from(&Self::config_path())
+    }
+
+    pub fn load_from(path: &Path) -> Self {
+        let Ok(raw) = fs::read_to_string(path) else {
             return Self::default();
         };
         toml::from_str(&raw).unwrap_or_default()
     }
 
+    /// Formats configuration cleanly as deterministic TOML without heavy generic reflection.
+    pub fn to_toml_string(&self) -> String {
+        let mode_s = match self.mode {
+            ScanMode::Normal => "normal",
+            ScanMode::Advanced => "advanced",
+        };
+        let preset_s = match self.default_preset {
+            ScanPreset::Quick => "quick",
+            ScanPreset::Standard => "standard",
+            ScanPreset::Full => "full",
+            ScanPreset::WebDev => "webdev",
+            ScanPreset::Custom => "custom",
+        };
+        format!(
+            "mode = \"{mode_s}\"\n\
+             theme = \"{}\"\n\
+             accent = \"{}\"\n\
+             animations = {}\n\
+             splash = {}\n\
+             show_virtual_ifaces = {}\n\
+             default_preset = \"{preset_s}\"\n\
+             custom_ports = \"{}\"\n\
+             concurrency = {}\n\
+             timeout_ms = {}\n\
+             grab_banners = {}\n\
+             watch_interval_secs = {}\n",
+            self.theme.as_str(),
+            self.accent.as_str(),
+            self.animations,
+            self.splash,
+            self.show_virtual_ifaces,
+            escape_toml_str(&self.custom_ports),
+            self.concurrency,
+            self.timeout_ms,
+            self.grab_banners,
+            self.watch_interval_secs
+        )
+    }
+
     pub fn save(&self) -> Result<(), String> {
-        let dir = Self::config_dir();
-        fs::create_dir_all(&dir).map_err(|e| format!("Failed creating config dir: {e}"))?;
-        let text =
-            toml::to_string_pretty(self).map_err(|e| format!("Failed serializing config: {e}"))?;
-        fs::write(Self::config_path(), text).map_err(|e| format!("Failed saving config: {e}"))
+        self.save_to(&Self::config_path())
+    }
+
+    pub fn save_to(&self, path: &Path) -> Result<(), String> {
+        atomic_write_text(path, &self.to_toml_string(), "config")
     }
 }
 
 /// Persistent bookmark / trust record keyed by MAC address.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KnownHostEntry {
     pub mac: String,
     pub last_ip: String,
@@ -202,7 +271,7 @@ pub struct KnownHostEntry {
 }
 
 /// Store of known / bookmarked devices loaded from `~/.config/moonveil/known_hosts.toml`.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct KnownHostStore {
     #[serde(default)]
     pub hosts: BTreeMap<String, KnownHostEntry>,
@@ -210,20 +279,44 @@ pub struct KnownHostStore {
 
 impl KnownHostStore {
     pub fn load() -> Self {
-        let path = Config::known_hosts_path();
-        let Ok(raw) = fs::read_to_string(&path) else {
+        Self::load_from(&Config::known_hosts_path())
+    }
+
+    pub fn load_from(path: &Path) -> Self {
+        let Ok(raw) = fs::read_to_string(path) else {
             return Self::default();
         };
         toml::from_str(&raw).unwrap_or_default()
     }
 
+    /// Formats known hosts cleanly as deterministic TOML.
+    pub fn to_toml_string(&self) -> String {
+        let mut out = String::new();
+        for (key, entry) in &self.hosts {
+            let _ = writeln!(out, "[hosts.\"{}\"]", escape_toml_str(key));
+            let _ = writeln!(out, "mac = \"{}\"", escape_toml_str(&entry.mac));
+            let _ = writeln!(out, "last_ip = \"{}\"", escape_toml_str(&entry.last_ip));
+            if let Some(nick) = &entry.nickname {
+                let _ = writeln!(out, "nickname = \"{}\"", escape_toml_str(nick));
+            }
+            let _ = writeln!(out, "trusted = {}", entry.trusted);
+            if let Some(vendor) = &entry.vendor {
+                let _ = writeln!(out, "vendor = \"{}\"", escape_toml_str(vendor));
+            }
+            if let Some(hostname) = &entry.hostname {
+                let _ = writeln!(out, "hostname = \"{}\"", escape_toml_str(hostname));
+            }
+            out.push('\n');
+        }
+        out
+    }
+
     pub fn save(&self) -> Result<(), String> {
-        let dir = Config::config_dir();
-        fs::create_dir_all(&dir).map_err(|e| format!("Failed creating config dir: {e}"))?;
-        let text = toml::to_string_pretty(self)
-            .map_err(|e| format!("Failed serializing known hosts: {e}"))?;
-        fs::write(Config::known_hosts_path(), text)
-            .map_err(|e| format!("Failed saving known hosts: {e}"))
+        self.save_to(&Config::known_hosts_path())
+    }
+
+    pub fn save_to(&self, path: &Path) -> Result<(), String> {
+        atomic_write_text(path, &self.to_toml_string(), "known hosts")
     }
 
     pub fn upsert(
@@ -248,4 +341,33 @@ impl KnownHostStore {
             },
         );
     }
+}
+
+fn escape_toml_str(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn atomic_write_text(path: &Path, text: &str, label: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("Failed creating {label} dir: {e}"))?;
+    }
+    let tmp_path = path.with_extension("toml.tmp");
+    if fs::write(&tmp_path, text).is_ok() {
+        if fs::rename(&tmp_path, path).is_ok() {
+            return Ok(());
+        }
+        let _ = fs::remove_file(&tmp_path);
+    }
+    fs::write(path, text).map_err(|e| format!("Failed saving {label}: {e}"))
 }
