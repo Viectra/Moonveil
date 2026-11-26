@@ -589,6 +589,7 @@ pub fn build_demo_snapshot() -> (NetworkSnapshot, Vec<TimelineEvent>) {
         LocalSocket {
             proto: "TCP".to_string(),
             local_addr: "192.168.1.12:22".to_string(),
+            local_ip_v4: Some(Ipv4Addr::new(192, 168, 1, 12)),
             local_port: 22,
             remote_addr: "192.168.1.42:58104".to_string(),
             remote_ip_v4: Some(Ipv4Addr::new(192, 168, 1, 42)),
@@ -601,6 +602,7 @@ pub fn build_demo_snapshot() -> (NetworkSnapshot, Vec<TimelineEvent>) {
         LocalSocket {
             proto: "TCP".to_string(),
             local_addr: "192.168.1.12:51422".to_string(),
+            local_ip_v4: Some(Ipv4Addr::new(192, 168, 1, 12)),
             local_port: 51422,
             remote_addr: "192.168.1.1:22".to_string(),
             remote_ip_v4: Some(Ipv4Addr::new(192, 168, 1, 1)),
@@ -613,6 +615,7 @@ pub fn build_demo_snapshot() -> (NetworkSnapshot, Vec<TimelineEvent>) {
         LocalSocket {
             proto: "TCP".to_string(),
             local_addr: "192.168.1.12:48220".to_string(),
+            local_ip_v4: Some(Ipv4Addr::new(192, 168, 1, 12)),
             local_port: 48220,
             remote_addr: "192.168.1.20:8006".to_string(),
             remote_ip_v4: Some(Ipv4Addr::new(192, 168, 1, 20)),
@@ -625,6 +628,7 @@ pub fn build_demo_snapshot() -> (NetworkSnapshot, Vec<TimelineEvent>) {
         LocalSocket {
             proto: "TCP".to_string(),
             local_addr: "192.168.1.12:43910".to_string(),
+            local_ip_v4: Some(Ipv4Addr::new(192, 168, 1, 12)),
             local_port: 43910,
             remote_addr: "192.168.1.30:445".to_string(),
             remote_ip_v4: Some(Ipv4Addr::new(192, 168, 1, 30)),
@@ -637,6 +641,7 @@ pub fn build_demo_snapshot() -> (NetworkSnapshot, Vec<TimelineEvent>) {
         LocalSocket {
             proto: "TCP".to_string(),
             local_addr: "0.0.0.0:3000".to_string(),
+            local_ip_v4: None,
             local_port: 3000,
             remote_addr: "0.0.0.0:0".to_string(),
             remote_ip_v4: None,
@@ -649,6 +654,7 @@ pub fn build_demo_snapshot() -> (NetworkSnapshot, Vec<TimelineEvent>) {
         LocalSocket {
             proto: "TCP".to_string(),
             local_addr: "127.0.0.1:5432".to_string(),
+            local_ip_v4: Some(Ipv4Addr::LOCALHOST),
             local_port: 5432,
             remote_addr: "0.0.0.0:0".to_string(),
             remote_ip_v4: None,
@@ -661,6 +667,7 @@ pub fn build_demo_snapshot() -> (NetworkSnapshot, Vec<TimelineEvent>) {
         LocalSocket {
             proto: "TCP".to_string(),
             local_addr: "127.0.0.1:6379".to_string(),
+            local_ip_v4: Some(Ipv4Addr::LOCALHOST),
             local_port: 6379,
             remote_addr: "0.0.0.0:0".to_string(),
             remote_ip_v4: None,

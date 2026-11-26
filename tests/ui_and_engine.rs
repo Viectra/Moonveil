@@ -16,8 +16,9 @@ use moonveil::config::{AccentId, Config, KnownHostStore, ThemeId};
 use moonveil::net::demo::build_demo_snapshot;
 use moonveil::net::linux::{collect_local_sockets, network_addr, parse_proc_hex_ipv4};
 use moonveil::net::model::{
-    parse_port_expr, ports_for_preset, ExportFormat, HostSortColumn, PortState, ScanMode,
-    ScanPreset,
+    clean_discovered_hostname, parse_port_expr, ports_for_preset, service_info, ArpState,
+    DeviceRole, ExportFormat, Host, HostSortColumn, LocalSocket, PortFilter, PortState, ScanMode,
+    ScanPreset, SocketState,
 };
 use moonveil::net::oui::{lookup_vendor, parse_oui_csv};
 use moonveil::net::scanner::scan_ports_for_host;
@@ -59,9 +60,11 @@ fn test_parse_port_expr_and_presets() {
     assert!(parse_port_expr("0").is_err());
     assert!(parse_port_expr("9000-8000").is_err());
 
-    assert_eq!(ports_for_preset(ScanPreset::Quick, "").len(), 32);
+    assert_eq!(ports_for_preset(ScanPreset::Quick, "").len(), 37);
+    assert!(ports_for_preset(ScanPreset::Quick, "").contains(&8765));
     assert_eq!(ports_for_preset(ScanPreset::Standard, "").len(), 100);
-    assert!(ports_for_preset(ScanPreset::Full, "").len() >= 1000);
+    assert!(ports_for_preset(ScanPreset::Full, "").len() > 1024);
+    assert!(ports_for_preset(ScanPreset::Full, "").contains(&8765));
     assert!(ports_for_preset(ScanPreset::WebDev, "").contains(&8096));
     assert_eq!(
         ports_for_preset(ScanPreset::Custom, "22,8080"),
@@ -135,51 +138,43 @@ fn test_smart_search_filters() {
 }
 
 #[test]
-fn test_headless_render_all_tabs_modes_sizes_and_modals() {
-    let sizes = [(140, 42), (100, 30), (76, 22), (40, 10), (10, 4)];
+fn test_headless_render_all_tabs_sizes_and_modals() {
+    let sizes = [(225, 64), (140, 40), (100, 30), (76, 22), (40, 10), (10, 4)];
     for (w, h) in sizes {
         let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("test terminal");
-        for mode in [ScanMode::Normal, ScanMode::Advanced] {
-            let mut app = demo_app(mode);
-            app.scan_progress.active = true;
-            app.scan_progress.probed = 128;
-            app.scan_progress.total = 254;
-            app.scan_progress.current_target = "192.168.1.42".to_string();
-            app.show_closed_ports = true;
+        let mut app = demo_app(ScanMode::Normal);
+        app.scan_progress.active = true;
+        app.scan_progress.probed = 128;
+        app.scan_progress.total = 254;
+        app.scan_progress.current_target = "192.168.1.42".to_string();
 
-            for &tab in Tab::ALL {
-                app.tab = tab;
-                terminal
-                    .draw(|f| ui::render(f, &mut app))
-                    .expect("render tab");
-            }
-            app.tab = Tab::Hosts;
-            app.modal = Modal::Help;
+        for &tab in Tab::ALL {
+            app.tab = tab;
             terminal
                 .draw(|f| ui::render(f, &mut app))
-                .expect("render help modal");
-
-            app.modal = Modal::RenameHost {
-                ip: Ipv4Addr::new(192, 168, 1, 1),
-                input: "Gateway".to_string(),
-            };
-            terminal
-                .draw(|f| ui::render(f, &mut app))
-                .expect("render rename modal");
-
-            app.modal = Modal::CustomPorts {
-                input: "22,80,443".to_string(),
-                error: Some("Sample warning".to_string()),
-            };
-            terminal
-                .draw(|f| ui::render(f, &mut app))
-                .expect("render custom ports modal");
-
-            app.launch_traceroute(Ipv4Addr::new(192, 168, 1, 1));
-            terminal
-                .draw(|f| ui::render(f, &mut app))
-                .expect("render traceroute modal");
+                .expect("render tab");
         }
+        app.tab = Tab::Hosts;
+        app.modal = Modal::Help;
+        terminal
+            .draw(|f| ui::render(f, &mut app))
+            .expect("render help modal");
+
+        app.modal = Modal::RenameHost {
+            ip: Ipv4Addr::new(192, 168, 1, 1),
+            input: "Gateway".to_string(),
+        };
+        terminal
+            .draw(|f| ui::render(f, &mut app))
+            .expect("render rename modal");
+
+        app.modal = Modal::CustomPorts {
+            input: "22,80,443".to_string(),
+            error: Some("Sample warning".to_string()),
+        };
+        terminal
+            .draw(|f| ui::render(f, &mut app))
+            .expect("render custom ports modal");
     }
 }
 
@@ -189,14 +184,17 @@ fn test_mouse_hit_registry_interactions() {
     let mut app = demo_app(ScanMode::Normal);
 
     terminal.draw(|f| ui::render(f, &mut app)).unwrap();
-    assert_eq!(app.config.mode, ScanMode::Normal);
+    assert_eq!(app.config.default_preset, ScanPreset::Quick);
 
-    click_action(&mut app, &ClickAction::ToggleMode);
-    assert_eq!(app.config.mode, ScanMode::Advanced);
+    click_action(&mut app, &ClickAction::CyclePreset);
+    assert_eq!(app.config.default_preset, ScanPreset::Standard);
 
     terminal.draw(|f| ui::render(f, &mut app)).unwrap();
-    click_action(&mut app, &ClickAction::SortBy(HostSortColumn::Rtt));
-    assert_eq!(app.host_sort, HostSortColumn::Rtt);
+    click_action(&mut app, &ClickAction::SortBy(HostSortColumn::OpenPorts));
+    assert_eq!(app.host_sort, HostSortColumn::OpenPorts);
+
+    click_action(&mut app, &ClickAction::SetPortFilter(PortFilter::Closed));
+    assert_eq!(app.port_filter, PortFilter::Closed);
 
     click_action(&mut app, &ClickAction::FocusSearch);
     assert!(app.search_focused);
@@ -371,6 +369,7 @@ fn test_persist_state_clicks_write_config_and_known_hosts() {
     impl Drop for EnvDirGuard {
         fn drop(&mut self) {
             std::env::remove_var("MOONVEIL_CONFIG_DIR");
+            std::env::remove_var("XDG_DATA_HOME");
             let _ = std::fs::remove_dir_all(&self.dir);
         }
     }
@@ -378,6 +377,7 @@ fn test_persist_state_clicks_write_config_and_known_hosts() {
     let dir = std::env::temp_dir().join(format!("moonveil_persist_test_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::env::set_var("MOONVEIL_CONFIG_DIR", &dir);
+    std::env::set_var("XDG_DATA_HOME", &dir);
     let _guard = EnvDirGuard { dir: dir.clone() };
 
     let mut terminal = Terminal::new(TestBackend::new(140, 42)).expect("test terminal");
@@ -386,20 +386,28 @@ fn test_persist_state_clicks_write_config_and_known_hosts() {
     let target_ip = Ipv4Addr::new(192, 168, 1, 1);
 
     terminal.draw(|f| ui::render(f, &mut app)).unwrap();
-    click_action(&mut app, &ClickAction::ToggleMode);
     click_action(&mut app, &ClickAction::CyclePreset);
-    click_action(&mut app, &ClickAction::ToggleTrusted(target_ip));
+    click_action(&mut app, &ClickAction::OpenRenameModal(target_ip));
+    assert!(matches!(app.modal, Modal::RenameHost { .. }));
+    app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(app.modal, Modal::None));
 
     click_action(&mut app, &ClickAction::SwitchTab(Tab::Settings));
     terminal.draw(|f| ui::render(f, &mut app)).unwrap();
     click_action(&mut app, &ClickAction::SetTheme(ThemeId::Abyss));
     click_action(&mut app, &ClickAction::SetAccent(AccentId::Peach));
+    click_action(&mut app, &ClickAction::ExportSnapshot(ExportFormat::Json));
 
     assert!(dir.join("config.toml").exists());
     assert!(dir.join("known_hosts.toml").exists());
+    let export_entries: Vec<_> = std::fs::read_dir(dir.join("moonveil").join("exports"))
+        .expect("export dir created")
+        .collect();
+    assert_eq!(export_entries.len(), 1);
 
     let reloaded_cfg = Config::load();
-    assert_eq!(reloaded_cfg.mode, ScanMode::Advanced);
     assert_eq!(reloaded_cfg.default_preset, ScanPreset::Standard);
     assert_eq!(reloaded_cfg.theme, ThemeId::Abyss);
     assert_eq!(reloaded_cfg.accent, AccentId::Peach);
@@ -408,8 +416,140 @@ fn test_persist_state_clicks_write_config_and_known_hosts() {
     let entry = reloaded_hosts
         .hosts
         .get("F0:9F:C2:41:88:01")
-        .expect("trusted toggle persisted gateway MAC");
-    assert!(!entry.trusted);
+        .expect("rename persisted gateway MAC");
+    assert_eq!(entry.nickname.as_deref(), Some("Main Router 1"));
+}
+
+#[test]
+fn test_hostname_cleaning_and_smart_device_display_name() {
+    assert_eq!(
+        clean_discovered_hostname("wattson1.home"),
+        Some("wattson1".to_string())
+    );
+    assert_eq!(
+        clean_discovered_hostname("Freebox-Server.local."),
+        Some("Freebox-Server".to_string())
+    );
+    assert_eq!(
+        clean_discovered_hostname("android-2-home-home-home.home"),
+        Some("android-2".to_string())
+    );
+    assert_eq!(clean_discovered_hostname("_gateway"), None);
+    assert_eq!(clean_discovered_hostname("none.local"), None);
+    assert_eq!(
+        clean_discovered_hostname("e6f16a61-1778-46e4-a833-d6638ab8fda4.home"),
+        None
+    );
+
+    let canon_printer = Host {
+        ip: Ipv4Addr::new(192, 168, 1, 36),
+        ipv6: None,
+        hostname: None,
+        nickname: None,
+        mac: None,
+        oui_prefix: None,
+        vendor: Some("CANON INC.".to_string()),
+        is_randomized_mac: false,
+        online: true,
+        trusted: true,
+        role: DeviceRole::Host,
+        arp_state: ArpState::Reachable,
+        ttl: None,
+        os_guess: None,
+        rtt_ms: Some(10.0),
+        rtt_history: vec![10.0],
+        jitter_ms: None,
+        packet_loss_pct: 0.0,
+        ports: vec![moonveil::net::model::PortInfo {
+            port: 631,
+            proto: moonveil::net::model::Proto::Tcp,
+            state: PortState::Open,
+            service: "ipp".to_string(),
+            description: "Network printing (CUPS)".to_string(),
+            banner: None,
+            banner_hex: None,
+            latency_ms: Some(2.0),
+            process: None,
+            pid: None,
+            peer_endpoint: None,
+        }],
+        first_seen_epoch: 0,
+        last_seen_epoch: 0,
+        discovered_tick: 0,
+        subnet_cidr: "192.168.1.0/24".to_string(),
+        interface: "enp6s18".to_string(),
+        is_new: false,
+    };
+    assert_eq!(canon_printer.display_name(), "Canon Printer");
+    assert_ne!(canon_printer.display_name(), "192.168.1.36");
+
+    let bare_device = Host {
+        vendor: None,
+        ports: Vec::new(),
+        ip: Ipv4Addr::new(192, 168, 1, 99),
+        ..canon_printer
+    };
+    assert_eq!(bare_device.display_name(), "Device .99");
+}
+
+#[tokio::test]
+async fn test_port_descriptions_and_local_in_use_accuracy() {
+    assert_eq!(service_info(8765).0, "http-alt");
+    assert_eq!(service_info(54321), ("tcp", ""));
+
+    // HTTP server on an arbitrary high ephemeral port must still get HTTP banner via fallback probe.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http_port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        if let Ok((mut sock, _)) = listener.accept().await {
+            let mut req = [0u8; 256];
+            let _ = sock.read(&mut req).await;
+            let _ = sock
+                .write_all(b"HTTP/1.0 200 OK\r\nServer: SimpleHTTP/0.6\r\n\r\n<title>Dist</title>")
+                .await;
+        }
+    });
+
+    let closed_port = {
+        let tmp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        tmp.local_addr().unwrap().port()
+    };
+
+    // Outbound ESTABLISHED socket where remote_port == closed_port must NOT falsely mark local port IN USE.
+    let fake_outbound = vec![LocalSocket {
+        proto: "TCP".to_string(),
+        local_addr: "127.0.0.1:51234".to_string(),
+        local_ip_v4: Some(Ipv4Addr::LOCALHOST),
+        local_port: 51234,
+        remote_addr: format!("192.168.1.1:{http_port}"),
+        remote_ip_v4: Some(Ipv4Addr::new(192, 168, 1, 1)),
+        remote_port: http_port,
+        state: SocketState::Established,
+        pid: Some(999),
+        process: Some("curl".to_string()),
+        inode: 123,
+    }];
+
+    let results = scan_ports_for_host(
+        Ipv4Addr::LOCALHOST,
+        &[http_port, closed_port],
+        600,
+        true,
+        &fake_outbound,
+        true,
+    )
+    .await;
+
+    let open_res = results.iter().find(|p| p.port == http_port).unwrap();
+    assert_eq!(open_res.state, PortState::Open);
+    assert!(open_res
+        .banner
+        .as_deref()
+        .unwrap_or("")
+        .contains("SimpleHTTP/0.6"));
+
+    let closed_res = results.iter().find(|p| p.port == closed_port).unwrap();
+    assert_eq!(closed_res.state, PortState::Closed);
 }
 
 #[test]

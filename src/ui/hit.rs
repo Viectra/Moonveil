@@ -4,24 +4,19 @@ use std::net::Ipv4Addr;
 
 use ratatui::layout::Rect;
 
-use crate::app::{SocketFilter, Tab};
+use crate::app::Tab;
 use crate::config::{AccentId, ThemeId};
-use crate::net::model::{
-    DeviceRole, ExportFormat, HostSortColumn, PortFilter, ScanMode, ScanPreset,
-};
+use crate::net::model::{ExportFormat, HostSortColumn, PortFilter, ScanPreset};
 
 /// Action dispatched when a registered UI rectangle is clicked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClickAction {
     SwitchTab(Tab),
-    ToggleMode,
-    SetMode(ScanMode),
     CycleInterface,
     SelectInterface(usize),
     StartOrStopScan,
     CyclePreset,
     SetPreset(ScanPreset),
-    ToggleWatch,
     ToggleHelp,
     CloseModal,
     Quit,
@@ -31,39 +26,21 @@ pub enum ClickAction {
     ClearSearch,
     SortBy(HostSortColumn),
     SelectHost(Ipv4Addr),
-    ToggleInspectorPane,
-    ToggleTrusted(Ipv4Addr),
     OpenRenameModal(Ipv4Addr),
     SetPortFilter(PortFilter),
-    ToggleClosedPorts,
-    TogglePingMonitor(Ipv4Addr),
-    LaunchTraceroute(Ipv4Addr),
-    SendWol(Ipv4Addr),
     DeepScanHost(Ipv4Addr),
     CopyText(String, String),
 
     SelectRadarOctet(u8),
     RadarPageDelta(i32),
-    RadarFilterRole(Option<DeviceRole>),
-
-    SelectNetInterface(usize),
-    SetSocketFilter(SocketFilter),
-    FocusSocketSearch,
-    ClearSocketSearch,
     JumpToHostIp(Ipv4Addr),
 
     ExportSnapshot(ExportFormat),
-    ClearTimeline,
-
     SetTheme(ThemeId),
     SetAccent(AccentId),
     ToggleAnimations,
-    ToggleSplash,
     ToggleVirtualIfaces,
     ToggleGrabBanners,
-    CycleConcurrency,
-    CycleTimeout,
-    CycleWatchInterval,
     OpenCustomPortsModal,
     ResetDefaults,
 }
@@ -73,10 +50,6 @@ pub enum ClickAction {
 pub enum ScrollTarget {
     Hosts,
     InspectorPorts,
-    Sockets,
-    Interfaces,
-    Timeline,
-    SavedHosts,
     Settings,
 }
 

@@ -12,18 +12,14 @@
 
 ## Highlights
 
-- **Moonveil Visual Identity**: Cosmic navy (`#0D0F22`), electric **MOON** violet (`#9B59F6`), and warm **VEIL** crescent peach (`#F7CDBE`) TrueColor interface featuring a half-block Moonveil emblem, animated launch shimmer, Crescent Scan Wave bar, and smooth 24-bit subpixel spline charts.
-- **100% Mouse Clickable + Keyboard Driven**: Click sidebar tabs, interface switchers, Normal/Advanced mode slider, column sort headers, host rows (double-click to inspect), trust stars, port filter pills, collapsible closed-port rows, `16×16` Subnet Radar tiles, and Watch/Export controls.
-- **Port Intelligence (`In Use` • `Open` • `Closed` • `Filtered`)**:
-  - **In Use**: Correlates `/proc/net/{tcp,tcp6,udp,udp6}` and `/proc/<pid>/fd` to highlight active `ESTABLISHED` connections with owning process name, PID, and peer endpoint.
-  - **Open**: Listening services enriched with live HTTP `<title>`, TLS certificate CN/version, and SSH/FTP/Redis/SMTP greeting banners.
-  - **Closed vs. Filtered**: Distinguishes explicit TCP `RST` (`Closed`) from firewall silent drops (`Filtered`), collapsing closed ports cleanly into an expandable summary pill.
-- **Normal Mode vs. Advanced Mode (`m`)**: Switch instantly without losing scan data:
-  - **Normal Mode ("Clean Radar")**: Device role icons, friendly hostname/nickname, IP, IEEE OUI vendor, RTT badge, and plain-English service tags (`SSH`, `Web`, `Files`, `DB`, `Docker`).
-  - **Advanced Mode ("Deep Recon")**: Full IPv4 + IPv6, MAC + OUI prefix, ARP neighbor state (`REACHABLE`/`STALE`/`DELAY`), TTL OS guess, per-state port breakdown, raw banners, and custom port expressions (`1-65535`, `22,80,443,8000-8090`).
-- **Interactive `16×16` Subnet Radar**: Clickable `.0`–`.255` grid with live scan sweep cursor and `/24` slice paging for `/16` networks (e.g., Docker bridges).
-- **Watch Mode, Host Tools & Exports**: Continuous background sweep with change timeline (new/untrusted host alerts, port changes), persistent trusted/bookmarked hosts, live RTT Ping Monitor, unprivileged `IP_RECVERR` Traceroute, Wake-on-LAN (`⏻ WoL`), OSC 52 clipboard copy, and `JSON` / `CSV` / `Markdown` exports.
-- **Privilege-Smart Engine**: Works immediately as an unprivileged user (`USER`/`ICMP` via TCP touch, `/proc/net/arp`, mDNS `.local`, and `/proc/net` socket correlation) and unlocks raw ICMP/SYN/ARP probes when run with `sudo` or `CAP_NET_RAW`.
+- **Moonveil Visual Identity**: Cosmic navy (`#0D0F22`), electric **MOON** violet (`#9B59F6`), and warm **VEIL** crescent peach (`#F7CDBE`) TrueColor interface featuring a half-block Moonveil emblem, animated launch shimmer, and Crescent Scan Wave bar.
+- **100% Mouse Clickable + Keyboard Driven**: Clean 3-view layout (**Devices**, **Subnet Map**, **Settings**) with clickable interface switchers, sortable device table, port filters (`Open`, `In Use`, `Closed`), `16×16` Subnet Map tiles, and snapshot exports.
+- **Multi-Protocol Machine Identification**: Automatically resolves device names via router DNS PTR (bypassing `systemd-resolved`), unicast/multicast mDNS (`.local`), NetBIOS (`:137`), LLMNR (`:5355`), `/etc/hosts`, TLS certificate CNs, `tailscale status`, and friendly OUI vendor fallbacks so `Device` never repeats a raw IP.
+- **Port Intelligence (`Open` • `In Use` • `Closed` • `Filtered`)**:
+  - **In Use**: Correlates `/proc/net/{tcp,tcp6,udp,udp6}` and `/proc/<pid>/fd` to highlight active `ESTABLISHED` local sessions with owning process name, PID, and peer endpoint.
+  - **Open**: Enriches listening services with HTTP `<title>`, Server header, TLS certificate CN/version, and SSH/FTP/Redis/SMTP greeting banners across both standard and custom/ephemeral HTTP ports.
+  - **Closed vs. Filtered**: Cleanly separates open ports by default from TCP `RST` (`Closed`) and firewall drops (`Filtered`) under the `Closed` tab.
+- **Privilege-Smart Engine**: Works immediately as an unprivileged user (`USER`/`ICMP` via TCP touch, `/proc/net/arp`, and `/proc/net` socket correlation) and unlocks raw ICMP/SYN/ARP probes when run with `sudo` or `CAP_NET_RAW`.
 
 ---
 
@@ -69,15 +65,14 @@ mvl [OPTIONS]
 
 | Action | Mouse | Keyboard |
 | --- | --- | --- |
-| Switch views | Click sidebar / topbar tab | `1`–`5` or `Tab` / `Shift+Tab` |
-| Toggle Normal / Advanced | Click `Normal ──● Advanced` | `m` |
+| Switch views | Click sidebar / topbar tab | `1`–`3` or `Tab` / `Shift+Tab` |
 | Start / Stop scan | Click `▶ Scan` / `■ Stop` | `s` |
-| Cycle port preset | Click preset pill | `p` |
-| Search & smart filter | Click search bar | `/` (`port:22`, `state:in-use`, `state:closed`, `vendor:apple`) |
-| Toggle Watch Mode | Click `Watch` pill | `w` |
-| Trust / Rename device | Click `★ Trusted` or `* Rename` | `t` / `n` |
+| Cycle port preset | Click `Preset:` pill | `p` |
+| Deep scan device (1,000+ ports) | Click `▶ Deep Scan` | — |
+| Search & smart filter | Click search bar | `/` (`port:22`, `state:in-use`, `vendor:canon`) |
+| Rename device | Click `* Rename` | `n` |
 | Navigate & scroll | Click / Wheel scroll | `↑` `↓` / `j` `k` |
-| Export JSON | Click `Export JSON` | `e` |
+| Export JSON / CSV / MD | Click export in `Settings` | `e` (JSON) |
 | Help / Quit | Click `? Help` / `× Quit` | `?` / `q` or `Ctrl+C` |
 
 ---

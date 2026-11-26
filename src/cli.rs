@@ -875,7 +875,7 @@ pub async fn run_cli() {
     };
 
     let mut app = App::new(cfg, opts.demo_mode, opts.iface.as_deref());
-    app.watch_mode = opts.watch;
+    let _ = opts.watch;
     app.start_scan(None);
 
     let mut dirty = true;

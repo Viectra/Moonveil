@@ -1,4 +1,4 @@
-//! Application state controller: event loop ticks, mouse/key handling, Watch diffs, and async scan orchestration.
+//! Application state controller: event loop ticks, mouse/key handling, and async scan orchestration.
 
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
@@ -11,21 +11,19 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use tokio::sync::mpsc;
 
 use crate::config::{Config, KnownHostStore};
-use crate::net::demo::{build_demo_snapshot, demo_traceroute, tick_demo_snapshot};
+use crate::net::demo::{build_demo_snapshot, tick_demo_snapshot};
 use crate::net::linux::{
     collect_interfaces, collect_local_sockets, detect_privilege, epoch_now, network_addr,
-    prefix_mask, read_arp_entries, read_user_and_host,
+    prefix_mask, read_arp_entries, read_etc_hosts, read_tailscale_peers, read_user_and_host,
 };
 use crate::net::model::{
-    format_mac, format_oui, infer_device_role, parse_mac, parse_port_expr, ArpState, DeviceRole,
-    EventKind, ExportFormat, Host, HostSortColumn, NetworkInterface, NetworkSnapshot, PortFilter,
-    PortState, ScanPreset, TimelineEvent, TracerouteHop,
+    clean_discovered_hostname, format_mac, format_oui, infer_device_role, parse_mac,
+    parse_port_expr, ArpState, DeviceRole, ExportFormat, Host, HostSortColumn, NetworkInterface,
+    NetworkSnapshot, PortFilter, PortState, ScanPreset,
 };
 use crate::net::oui::lookup_vendor;
 use crate::net::scanner::{run_scan, EngineEvent, ScanConfig};
-use crate::net::tools::{
-    copy_osc52, export_snapshot, run_ping_monitor, run_traceroute, send_wake_on_lan,
-};
+use crate::net::tools::{copy_osc52, export_snapshot};
 use crate::ui::hit::{ClickAction, HitRegistry, ScrollTarget};
 use crate::ui::theme::Palette;
 
@@ -34,68 +32,33 @@ use crate::ui::theme::Palette;
 pub enum Tab {
     Hosts,
     Radar,
-    Network,
-    Watch,
     Settings,
 }
 
 impl Tab {
-    pub const ALL: &'static [Self] = &[
-        Self::Hosts,
-        Self::Radar,
-        Self::Network,
-        Self::Watch,
-        Self::Settings,
-    ];
+    pub const ALL: &'static [Self] = &[Self::Hosts, Self::Radar, Self::Settings];
 
     pub const fn icon(self) -> &'static str {
         match self {
             Self::Hosts => "●",
             Self::Radar => "⊞",
-            Self::Network => "⇄",
-            Self::Watch => "◈",
             Self::Settings => "◆",
         }
     }
 
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Hosts => "Hosts",
-            Self::Radar => "Subnet Radar",
-            Self::Network => "Net & Sockets",
-            Self::Watch => "Watch & Export",
+            Self::Hosts => "Devices",
+            Self::Radar => "Subnet Map",
             Self::Settings => "Settings",
         }
     }
 
     pub const fn short_label(self) -> &'static str {
         match self {
-            Self::Hosts => "Hosts",
+            Self::Hosts => "Devices",
             Self::Radar => "Radar",
-            Self::Network => "Sockets",
-            Self::Watch => "Watch",
-            Self::Settings => "Config",
-        }
-    }
-}
-
-/// Filter tabs for the local sockets view.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SocketFilter {
-    #[default]
-    All,
-    Established,
-    Listen,
-}
-
-impl SocketFilter {
-    pub const ALL: &'static [Self] = &[Self::All, Self::Established, Self::Listen];
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::All => "All",
-            Self::Established => "In Use",
-            Self::Listen => "Open/Listen",
+            Self::Settings => "Settings",
         }
     }
 }
@@ -112,9 +75,6 @@ pub enum Modal {
     CustomPorts {
         input: String,
         error: Option<String>,
-    },
-    Traceroute {
-        ip: Ipv4Addr,
     },
 }
 
@@ -135,35 +95,16 @@ pub struct App {
     pub host_scroll: usize,
     pub port_filter: PortFilter,
     pub port_scroll: usize,
-    pub show_closed_ports: bool,
-    pub show_inspector_on_compact: bool,
     pub radar_selected_octet: u8,
     pub radar_page_offset: u32,
-    pub radar_role_filter: Option<DeviceRole>,
-    pub socket_filter: SocketFilter,
-    pub socket_search: String,
-    pub socket_search_focused: bool,
-    pub socket_scroll: usize,
-    pub net_iface_scroll: usize,
-    pub timeline: Vec<TimelineEvent>,
-    pub timeline_scroll: usize,
-    pub saved_scroll: usize,
     pub settings_scroll: usize,
-    pub watch_mode: bool,
-    pub last_watch_scan: Instant,
     pub scan_progress: crate::net::model::ScanProgress,
     pub scan_cancel: Option<Arc<AtomicBool>>,
-    pub ping_target: Option<Ipv4Addr>,
-    pub ping_cancel: Option<Arc<AtomicBool>>,
-    pub trace_hops: Vec<TracerouteHop>,
-    pub trace_running: bool,
-    pub trace_cancel: Option<Arc<AtomicBool>>,
     pub modal: Modal,
     pub toast: Option<(String, Instant)>,
     pub tick_count: u64,
     pub splash_until: Option<Instant>,
     pub hover: Option<(u16, u16)>,
-    pub last_click: Option<(Ipv4Addr, Instant)>,
     pub hits: HitRegistry,
     pub persist_state: bool,
     pub should_quit: bool,
@@ -172,8 +113,6 @@ pub struct App {
     pub last_telemetry_at: Instant,
     pub telemetry_cycle: u64,
     telemetry_inflight: bool,
-    prev_online_set: HashSet<Ipv4Addr>,
-    prev_open_ports: HashMap<Ipv4Addr, HashSet<u16>>,
 }
 
 impl App {
@@ -183,8 +122,8 @@ impl App {
         let known_hosts = KnownHostStore::load();
         let palette = Palette::from_config(config.theme, config.accent);
 
-        let (mut snapshot, timeline) = if demo_mode {
-            build_demo_snapshot()
+        let mut snapshot = if demo_mode {
+            build_demo_snapshot().0
         } else {
             let (username, hostname) = read_user_and_host();
             let privilege = detect_privilege();
@@ -199,7 +138,7 @@ impl App {
                 hosts: Vec::new(),
             };
             seed_initial_hosts(&mut snap, &known_hosts);
-            (snap, Vec::new())
+            snap
         };
 
         apply_known_metadata(&mut snapshot.hosts, &known_hosts);
@@ -227,7 +166,6 @@ impl App {
             selected_iface_idx = idx;
         }
 
-        let selected_host_ip = snapshot.hosts.first().map(|h| h.ip);
         let splash_until = if config.splash && config.animations {
             Some(Instant::now() + Duration::from_millis(650))
         } else {
@@ -242,43 +180,24 @@ impl App {
             demo_mode,
             snapshot,
             selected_iface_idx,
-            selected_host_ip,
+            selected_host_ip: None,
             search_query: String::new(),
             search_focused: false,
             host_sort: HostSortColumn::Ip,
             host_sort_desc: false,
             host_scroll: 0,
-            port_filter: PortFilter::All,
+            port_filter: PortFilter::Open,
             port_scroll: 0,
-            show_closed_ports: false,
-            show_inspector_on_compact: false,
             radar_selected_octet: 1,
             radar_page_offset: 0,
-            radar_role_filter: None,
-            socket_filter: SocketFilter::All,
-            socket_search: String::new(),
-            socket_search_focused: false,
-            socket_scroll: 0,
-            net_iface_scroll: 0,
-            timeline,
-            timeline_scroll: 0,
-            saved_scroll: 0,
             settings_scroll: 0,
-            watch_mode: false,
-            last_watch_scan: Instant::now(),
             scan_progress: Default::default(),
             scan_cancel: None,
-            ping_target: None,
-            ping_cancel: None,
-            trace_hops: Vec::new(),
-            trace_running: false,
-            trace_cancel: None,
             modal: Modal::None,
             toast: None,
             tick_count: 0,
             splash_until,
             hover: None,
-            last_click: None,
             hits: HitRegistry::default(),
             persist_state: true,
             should_quit: false,
@@ -287,11 +206,13 @@ impl App {
             last_telemetry_at: Instant::now(),
             telemetry_cycle: 0,
             telemetry_inflight: false,
-            prev_online_set: HashSet::new(),
-            prev_open_ports: HashMap::new(),
         };
 
-        app.record_baseline_for_watch();
+        app.selected_host_ip = app
+            .filtered_hosts()
+            .first()
+            .map(|h| h.ip)
+            .or_else(|| app.snapshot.hosts.first().map(|h| h.ip));
         app
     }
 
@@ -372,9 +293,9 @@ impl App {
                     ra.partial_cmp(&rb).unwrap_or(std::cmp::Ordering::Equal)
                 }
                 HostSortColumn::OpenPorts => {
-                    let (_, oa, _, _) = a.port_counts();
-                    let (_, ob, _, _) = b.port_counts();
-                    oa.cmp(&ob).then_with(|| a.ip.cmp(&b.ip))
+                    let (ia, oa, _, _) = a.port_counts();
+                    let (ib, ob, _, _) = b.port_counts();
+                    (ia + oa).cmp(&(ib + ob)).then_with(|| a.ip.cmp(&b.ip))
                 }
                 HostSortColumn::InUsePorts => {
                     let (ia, _, _, _) = a.port_counts();
@@ -401,24 +322,20 @@ impl App {
         self.toast = Some((msg.into(), Instant::now() + Duration::from_secs(4)));
     }
 
-    pub fn push_event(
-        &mut self,
-        kind: EventKind,
-        ip: Option<Ipv4Addr>,
-        summary: impl Into<String>,
-    ) {
-        self.timeline.push(TimelineEvent {
-            timestamp: format_clock_now(),
-            kind,
-            ip,
-            summary: summary.into(),
-        });
-        if self.timeline.len() > 250 {
-            self.timeline.remove(0);
-        }
+    /// Starts a subnet sweep (or single-host probe) using the user's selected preset.
+    pub fn start_scan(&mut self, single_host: Option<Ipv4Addr>) {
+        self.start_scan_with_preset(single_host, self.config.default_preset);
     }
 
-    pub fn start_scan(&mut self, single_host: Option<Ipv4Addr>) {
+    /// Deep scans a specific device across `ScanPreset::Full` (1,000+ ports) and opens the Open filter.
+    pub fn start_deep_scan_host(&mut self, ip: Ipv4Addr) {
+        self.port_filter = PortFilter::Open;
+        self.port_scroll = 0;
+        self.start_scan_with_preset(Some(ip), ScanPreset::Full);
+        self.set_toast(format!("Deep scanning 1,000+ ports on {ip}…"));
+    }
+
+    fn start_scan_with_preset(&mut self, single_host: Option<Ipv4Addr>, preset: ScanPreset) {
         self.stop_scan();
         let Some(iface) = self.active_interface().cloned() else {
             self.set_toast("No active network interface selected.");
@@ -436,7 +353,11 @@ impl App {
         let cancel = Arc::new(AtomicBool::new(false));
         self.scan_cancel = Some(cancel.clone());
         self.scan_progress.active = true;
-        self.scan_progress.phase = format!("Starting scan on {}", iface.cidr);
+        self.scan_progress.phase = if let Some(ip) = single_host {
+            format!("Deep scanning {ip}")
+        } else {
+            format!("Scanning {}", iface.cidr)
+        };
         self.scan_progress.probed = 0;
         self.scan_progress.total = 1;
 
@@ -449,7 +370,7 @@ impl App {
 
         let cfg = ScanConfig {
             interface: iface,
-            preset: self.config.default_preset,
+            preset,
             custom_ports: self.config.custom_ports.clone(),
             concurrency: self.config.concurrency,
             timeout_ms: self.config.timeout_ms,
@@ -512,100 +433,12 @@ impl App {
         self.scan_progress.active = false;
     }
 
-    pub fn toggle_ping_monitor(&mut self, ip: Ipv4Addr) {
-        if self.ping_target == Some(ip) {
-            if let Some(c) = self.ping_cancel.take() {
-                c.store(true, Ordering::Relaxed);
-            }
-            self.ping_target = None;
-            self.set_toast(format!("Stopped ping monitor for {ip}"));
-            return;
-        }
-        if let Some(c) = self.ping_cancel.take() {
-            c.store(true, Ordering::Relaxed);
-        }
-        self.ping_target = Some(ip);
-        self.set_toast(format!("Live Ping monitor active -> {ip}"));
-        if self.demo_mode {
-            return;
-        }
-        if let Ok(rt) = tokio::runtime::Handle::try_current() {
-            let cancel = Arc::new(AtomicBool::new(false));
-            self.ping_cancel = Some(cancel.clone());
-            let priv_level = self.snapshot.privilege;
-            let tx = self.engine_tx.clone();
-            rt.spawn(async move {
-                run_ping_monitor(ip, priv_level, cancel, tx).await;
-            });
-        }
-    }
-
-    pub fn launch_traceroute(&mut self, ip: Ipv4Addr) {
-        if let Some(c) = self.trace_cancel.take() {
-            c.store(true, Ordering::Relaxed);
-        }
-        self.trace_hops.clear();
-        self.modal = Modal::Traceroute { ip };
-        if self.demo_mode {
-            self.trace_hops = demo_traceroute(ip);
-            self.trace_running = false;
-            return;
-        }
-        self.trace_running = true;
-        if let Ok(rt) = tokio::runtime::Handle::try_current() {
-            let cancel = Arc::new(AtomicBool::new(false));
-            self.trace_cancel = Some(cancel.clone());
-            let tx = self.engine_tx.clone();
-            rt.spawn(async move {
-                run_traceroute(ip, 16, cancel, tx).await;
-            });
-        }
-    }
-
-    pub fn toggle_trusted(&mut self, ip: Ipv4Addr) {
-        let mut saved_record = None;
-        let mut toast_msg = None;
-        if let Some(h) = self.snapshot.hosts.iter_mut().find(|h| h.ip == ip) {
-            h.trusted = !h.trusted;
-            h.is_new = !h.trusted && h.online;
-            if let Some(mac) = h.mac {
-                let mac_s = format_mac(mac);
-                saved_record = Some((
-                    mac_s,
-                    h.ip,
-                    h.nickname.clone(),
-                    h.trusted,
-                    h.vendor.clone(),
-                    h.hostname.clone(),
-                ));
-            }
-            toast_msg = Some(format!(
-                "{} marked {}",
-                h.display_name(),
-                if h.trusted {
-                    "Trusted ★"
-                } else {
-                    "Untrusted !"
-                }
-            ));
-        }
-        if let Some(msg) = toast_msg {
-            self.set_toast(msg);
-        }
-        if let Some((mac_s, ip, nick, trusted, vend, host)) = saved_record {
-            self.known_hosts
-                .upsert(&mac_s, ip, nick, trusted, vend, host);
-            self.save_known_hosts();
-        }
-    }
-
     pub fn export_now(&mut self, fmt: ExportFormat) -> Result<PathBuf, String> {
         let dir = Config::export_dir();
         let filename = format!("moonveil-{}.{}", epoch_now(), fmt.ext());
         let path = dir.join(filename);
         export_snapshot(&self.snapshot, fmt, &path)?;
         let msg = format!("Exported {} -> {}", fmt.label(), path.display());
-        self.push_event(EventKind::Action, None, msg.clone());
         self.set_toast(msg);
         Ok(path)
     }
@@ -675,16 +508,6 @@ impl App {
             }
         }
 
-        if self.watch_mode
-            && !self.scan_progress.active
-            && self.last_watch_scan.elapsed()
-                >= Duration::from_secs(self.config.watch_interval_secs.max(5))
-        {
-            self.last_watch_scan = Instant::now();
-            self.start_scan(None);
-            dirty = true;
-        }
-
         dirty
     }
 
@@ -736,39 +559,9 @@ impl App {
                 self.scan_progress.hosts_found = hosts_online;
                 self.scan_progress.ports_found = ports_open;
                 self.scan_progress.last_duration_ms = Some(duration_ms);
-                self.last_watch_scan = Instant::now();
-                self.diff_watch_events();
-                self.push_event(
-                    EventKind::ScanFinished,
-                    None,
-                    format!(
-                        "Scan complete: {hosts_online} online, {ports_open} open/in-use ports ({duration_ms}ms)"
-                    ),
-                );
                 self.set_toast(format!(
-                    "Scan done: {hosts_online} hosts, {ports_open} open ports ({duration_ms}ms)"
+                    "Scan complete: {hosts_online} devices, {ports_open} open ports ({duration_ms}ms)"
                 ));
-            }
-            EngineEvent::PingUpdate { ip, rtt_ms, ttl } => {
-                if let Some(h) = self.snapshot.hosts.iter_mut().find(|h| h.ip == ip) {
-                    if let Some(r) = rtt_ms {
-                        h.online = true;
-                        h.rtt_ms = Some(r);
-                        h.rtt_history.push(r);
-                        if h.rtt_history.len() > 40 {
-                            h.rtt_history.remove(0);
-                        }
-                    }
-                    if let Some(t) = ttl {
-                        h.ttl = Some(t);
-                    }
-                }
-            }
-            EngineEvent::TraceHop(hop) => {
-                self.trace_hops.push(hop);
-            }
-            EngineEvent::TraceComplete => {
-                self.trace_running = false;
             }
             EngineEvent::TelemetryUpdate {
                 interfaces,
@@ -780,89 +573,8 @@ impl App {
                 refresh_in_use_from_sockets(&mut self.snapshot);
             }
             EngineEvent::StatusToast(msg) => self.set_toast(msg),
+            _ => {}
         }
-    }
-
-    fn record_baseline_for_watch(&mut self) {
-        self.prev_online_set = self
-            .snapshot
-            .hosts
-            .iter()
-            .filter(|h| h.online)
-            .map(|h| h.ip)
-            .collect();
-        self.prev_open_ports.clear();
-        for h in &self.snapshot.hosts {
-            let ports: HashSet<u16> = h
-                .ports
-                .iter()
-                .filter(|p| matches!(p.state, PortState::Open | PortState::InUse))
-                .map(|p| p.port)
-                .collect();
-            self.prev_open_ports.insert(h.ip, ports);
-        }
-    }
-
-    fn diff_watch_events(&mut self) {
-        let mut new_online = HashSet::new();
-        let mut events = Vec::new();
-        for h in &self.snapshot.hosts {
-            if h.online {
-                new_online.insert(h.ip);
-                if !self.prev_online_set.contains(&h.ip) {
-                    let kind = if h.trusted {
-                        EventKind::HostJoined
-                    } else {
-                        EventKind::UnknownIntruder
-                    };
-                    events.push((
-                        kind,
-                        Some(h.ip),
-                        format!(
-                            "{} ({}) joined {}",
-                            h.ip,
-                            h.vendor.as_deref().unwrap_or("unknown vendor"),
-                            h.interface
-                        ),
-                    ));
-                }
-                let cur_ports: HashSet<u16> = h
-                    .ports
-                    .iter()
-                    .filter(|p| matches!(p.state, PortState::Open | PortState::InUse))
-                    .map(|p| p.port)
-                    .collect();
-                if let Some(prev_p) = self.prev_open_ports.get(&h.ip) {
-                    for p in cur_ports.difference(prev_p) {
-                        events.push((
-                            EventKind::PortOpened,
-                            Some(h.ip),
-                            format!("Port {p} opened on {}", h.ip),
-                        ));
-                    }
-                    for p in prev_p.difference(&cur_ports) {
-                        events.push((
-                            EventKind::PortClosed,
-                            Some(h.ip),
-                            format!("Port {p} closed on {}", h.ip),
-                        ));
-                    }
-                }
-            }
-        }
-        for old_ip in &self.prev_online_set {
-            if !new_online.contains(old_ip) {
-                events.push((
-                    EventKind::HostLeft,
-                    Some(*old_ip),
-                    format!("Host {old_ip} went offline"),
-                ));
-            }
-        }
-        for (k, ip, s) in events {
-            self.push_event(k, ip, s);
-        }
-        self.record_baseline_for_watch();
     }
 
     /// Handles keyboard input across modals, search bars, and global navigation.
@@ -879,12 +591,12 @@ impl App {
         // Modal keyboard capture
         match &mut self.modal {
             Modal::None => {}
-            Modal::Help | Modal::Traceroute { .. } => {
+            Modal::Help => {
                 if matches!(
                     key.code,
                     KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('?')
                 ) {
-                    self.close_modal();
+                    self.modal = Modal::None;
                 }
                 return;
             }
@@ -940,13 +652,10 @@ impl App {
             }
         }
 
-        // Focused text inputs
+        // Focused search input
         if self.search_focused {
             match key.code {
-                KeyCode::Esc => {
-                    self.search_focused = false;
-                }
-                KeyCode::Enter => {
+                KeyCode::Esc | KeyCode::Enter => {
                     self.search_focused = false;
                 }
                 KeyCode::Backspace => {
@@ -961,30 +670,13 @@ impl App {
             }
             return;
         }
-        if self.socket_search_focused {
-            match key.code {
-                KeyCode::Esc | KeyCode::Enter => self.socket_search_focused = false,
-                KeyCode::Backspace => {
-                    self.socket_search.pop();
-                    self.socket_scroll = 0;
-                }
-                KeyCode::Char(c) => {
-                    self.socket_search.push(c);
-                    self.socket_scroll = 0;
-                }
-                _ => {}
-            }
-            return;
-        }
 
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('?') => self.modal = Modal::Help,
             KeyCode::Char('1') => self.tab = Tab::Hosts,
             KeyCode::Char('2') => self.tab = Tab::Radar,
-            KeyCode::Char('3') => self.tab = Tab::Network,
-            KeyCode::Char('4') => self.tab = Tab::Watch,
-            KeyCode::Char('5') => self.tab = Tab::Settings,
+            KeyCode::Char('3') => self.tab = Tab::Settings,
             KeyCode::Tab => {
                 let idx = Tab::ALL.iter().position(|t| *t == self.tab).unwrap_or(0);
                 self.tab = Tab::ALL[(idx + 1) % Tab::ALL.len()];
@@ -993,28 +685,15 @@ impl App {
                 let idx = Tab::ALL.iter().position(|t| *t == self.tab).unwrap_or(0);
                 self.tab = Tab::ALL[(idx + Tab::ALL.len() - 1) % Tab::ALL.len()];
             }
-            KeyCode::Char('m') => self.handle_click_action(ClickAction::ToggleMode),
             KeyCode::Char('s') => self.handle_click_action(ClickAction::StartOrStopScan),
             KeyCode::Char('p') => self.handle_click_action(ClickAction::CyclePreset),
-            KeyCode::Char('w') => self.handle_click_action(ClickAction::ToggleWatch),
             KeyCode::Char('/') => {
-                if self.tab == Tab::Network {
-                    self.socket_search_focused = true;
-                } else {
-                    self.tab = Tab::Hosts;
-                    self.search_focused = true;
-                }
+                self.tab = Tab::Hosts;
+                self.search_focused = true;
             }
             KeyCode::Esc => {
                 if !self.search_query.is_empty() {
                     self.search_query.clear();
-                } else if self.show_inspector_on_compact {
-                    self.show_inspector_on_compact = false;
-                }
-            }
-            KeyCode::Char('t') => {
-                if let Some(ip) = self.selected_host().map(|h| h.ip) {
-                    self.toggle_trusted(ip);
                 }
             }
             KeyCode::Char('n') => {
@@ -1027,9 +706,6 @@ impl App {
             }
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
-            KeyCode::Enter if self.tab == Tab::Hosts => {
-                self.show_inspector_on_compact = !self.show_inspector_on_compact;
-            }
             _ => {}
         }
     }
@@ -1065,7 +741,6 @@ impl App {
                     return true;
                 }
                 self.search_focused = false;
-                self.socket_search_focused = false;
                 if let Some(action) = self.hits.hit_test(mouse.column, mouse.row) {
                     self.handle_click_action(action);
                 }
@@ -1092,18 +767,6 @@ impl App {
             Some(ScrollTarget::InspectorPorts) => {
                 self.port_scroll = self.port_scroll.saturating_add_signed(delta);
             }
-            Some(ScrollTarget::Sockets) => {
-                self.socket_scroll = self.socket_scroll.saturating_add_signed(delta);
-            }
-            Some(ScrollTarget::Interfaces) => {
-                self.net_iface_scroll = self.net_iface_scroll.saturating_add_signed(delta);
-            }
-            Some(ScrollTarget::Timeline) => {
-                self.timeline_scroll = self.timeline_scroll.saturating_add_signed(delta);
-            }
-            Some(ScrollTarget::SavedHosts) => {
-                self.saved_scroll = self.saved_scroll.saturating_add_signed(delta);
-            }
             Some(ScrollTarget::Settings) | None => {
                 self.settings_scroll = self.settings_scroll.saturating_add_signed(delta);
             }
@@ -1115,20 +778,6 @@ impl App {
         match action {
             ClickAction::SwitchTab(tab) => {
                 self.tab = tab;
-                self.show_inspector_on_compact = false;
-            }
-            ClickAction::ToggleMode => {
-                self.config.mode = self.config.mode.toggle();
-                self.save_config();
-                self.set_toast(format!(
-                    "Switched to {} Mode ({})",
-                    self.config.mode.label(),
-                    self.config.mode.subtitle()
-                ));
-            }
-            ClickAction::SetMode(mode) => {
-                self.config.mode = mode;
-                self.save_config();
             }
             ClickAction::CycleInterface => {
                 let vis = self.visible_interfaces();
@@ -1141,13 +790,17 @@ impl App {
                     self.selected_iface_idx = next;
                     self.radar_page_offset = 0;
                     self.host_scroll = 0;
+                    self.port_scroll = 0;
                     self.selected_host_ip = self.filtered_hosts().first().map(|h| h.ip);
                 }
             }
-            ClickAction::SelectInterface(idx) | ClickAction::SelectNetInterface(idx) => {
+            ClickAction::SelectInterface(idx) => {
                 if idx < self.snapshot.interfaces.len() {
                     self.selected_iface_idx = idx;
                     self.radar_page_offset = 0;
+                    self.host_scroll = 0;
+                    self.port_scroll = 0;
+                    self.selected_host_ip = self.filtered_hosts().first().map(|h| h.ip);
                 }
             }
             ClickAction::StartOrStopScan => {
@@ -1167,18 +820,6 @@ impl App {
                 self.config.default_preset = p;
                 self.save_config();
             }
-            ClickAction::ToggleWatch => {
-                self.watch_mode = !self.watch_mode;
-                self.last_watch_scan = Instant::now();
-                self.set_toast(if self.watch_mode {
-                    format!(
-                        "Watch Mode enabled (every {}s)",
-                        self.config.watch_interval_secs
-                    )
-                } else {
-                    "Watch Mode paused".to_string()
-                });
-            }
             ClickAction::ToggleHelp => {
                 self.modal = if matches!(self.modal, Modal::Help) {
                     Modal::None
@@ -1186,7 +827,7 @@ impl App {
                     Modal::Help
                 };
             }
-            ClickAction::CloseModal => self.close_modal(),
+            ClickAction::CloseModal => self.modal = Modal::None,
             ClickAction::Quit => self.should_quit = true,
             ClickAction::SkipSplash => self.splash_until = None,
             ClickAction::FocusSearch => self.search_focused = true,
@@ -1203,21 +844,9 @@ impl App {
                 }
             }
             ClickAction::SelectHost(ip) => {
-                let now = Instant::now();
-                let dbl = self.last_click.is_some_and(|(prev, t)| {
-                    prev == ip && now.duration_since(t) < Duration::from_millis(450)
-                });
-                self.last_click = Some((ip, now));
                 self.selected_host_ip = Some(ip);
                 self.port_scroll = 0;
-                if dbl {
-                    self.show_inspector_on_compact = true;
-                }
             }
-            ClickAction::ToggleInspectorPane => {
-                self.show_inspector_on_compact = !self.show_inspector_on_compact;
-            }
-            ClickAction::ToggleTrusted(ip) => self.toggle_trusted(ip),
             ClickAction::OpenRenameModal(ip) => {
                 let initial = self
                     .snapshot
@@ -1232,13 +861,7 @@ impl App {
                 self.port_filter = pf;
                 self.port_scroll = 0;
             }
-            ClickAction::ToggleClosedPorts => {
-                self.show_closed_ports = !self.show_closed_ports;
-            }
-            ClickAction::TogglePingMonitor(ip) => self.toggle_ping_monitor(ip),
-            ClickAction::LaunchTraceroute(ip) => self.launch_traceroute(ip),
-            ClickAction::DeepScanHost(ip) => self.start_scan(Some(ip)),
-            ClickAction::SendWol(ip) => self.trigger_wol(ip),
+            ClickAction::DeepScanHost(ip) => self.start_deep_scan_host(ip),
             ClickAction::CopyText(label, value) => {
                 copy_osc52(&value);
                 self.set_toast(format!("Copied {label} ({value}) to clipboard"));
@@ -1250,27 +873,16 @@ impl App {
                 let next = (self.radar_page_offset as i32 + delta).max(0) as u32;
                 self.radar_page_offset = next;
             }
-            ClickAction::RadarFilterRole(role) => self.radar_role_filter = role,
-            ClickAction::SetSocketFilter(sf) => {
-                self.socket_filter = sf;
-                self.socket_scroll = 0;
-            }
-            ClickAction::FocusSocketSearch => self.socket_search_focused = true,
-            ClickAction::ClearSocketSearch => {
-                self.socket_search.clear();
-                self.socket_scroll = 0;
-            }
             ClickAction::JumpToHostIp(ip) => {
                 self.selected_host_ip = Some(ip);
+                self.port_scroll = 0;
                 self.tab = Tab::Hosts;
-                self.show_inspector_on_compact = true;
             }
             ClickAction::ExportSnapshot(fmt) => {
                 if let Err(err) = self.export_now(fmt) {
                     self.set_toast(err);
                 }
             }
-            ClickAction::ClearTimeline => self.timeline.clear(),
             ClickAction::SetTheme(t) => {
                 self.config.theme = t;
                 self.palette = Palette::from_config(self.config.theme, self.config.accent);
@@ -1285,43 +897,12 @@ impl App {
                 self.config.animations = !self.config.animations;
                 self.save_config();
             }
-            ClickAction::ToggleSplash => {
-                self.config.splash = !self.config.splash;
-                self.save_config();
-            }
             ClickAction::ToggleVirtualIfaces => {
                 self.config.show_virtual_ifaces = !self.config.show_virtual_ifaces;
                 self.save_config();
             }
             ClickAction::ToggleGrabBanners => {
                 self.config.grab_banners = !self.config.grab_banners;
-                self.save_config();
-            }
-            ClickAction::CycleConcurrency => {
-                self.config.concurrency = match self.config.concurrency {
-                    64 => 128,
-                    128 => 256,
-                    256 => 512,
-                    _ => 64,
-                };
-                self.save_config();
-            }
-            ClickAction::CycleTimeout => {
-                self.config.timeout_ms = match self.config.timeout_ms {
-                    150 => 250,
-                    250 => 500,
-                    500 => 1000,
-                    _ => 150,
-                };
-                self.save_config();
-            }
-            ClickAction::CycleWatchInterval => {
-                self.config.watch_interval_secs = match self.config.watch_interval_secs {
-                    10 => 15,
-                    15 => 30,
-                    30 => 60,
-                    _ => 10,
-                };
                 self.save_config();
             }
             ClickAction::OpenCustomPortsModal => {
@@ -1337,14 +918,6 @@ impl App {
                 self.set_toast("Reset preferences to Moonveil defaults.");
             }
         }
-    }
-
-    fn close_modal(&mut self) {
-        if let Some(c) = self.trace_cancel.take() {
-            c.store(true, Ordering::Relaxed);
-        }
-        self.trace_running = false;
-        self.modal = Modal::None;
     }
 
     fn apply_host_nickname(&mut self, ip: Ipv4Addr, nick: String) {
@@ -1373,66 +946,38 @@ impl App {
         }
         self.set_toast(format!("Updated nickname for {ip}"));
     }
-
-    fn trigger_wol(&mut self, ip: Ipv4Addr) {
-        let mac_opt = self
-            .snapshot
-            .hosts
-            .iter()
-            .find(|h| h.ip == ip)
-            .and_then(|h| h.mac)
-            .or_else(|| {
-                self.known_hosts
-                    .hosts
-                    .values()
-                    .find(|e| e.last_ip == ip.to_string())
-                    .and_then(|e| parse_mac(&e.mac))
-            });
-        let Some(mac) = mac_opt else {
-            self.set_toast(format!("No MAC address known for {ip}"));
-            return;
-        };
-        let bcast = self.active_interface().and_then(|i| i.broadcast);
-        if self.demo_mode {
-            let msg = format!(
-                "Sent Wake-on-LAN magic packet to {} ({ip})",
-                format_mac(mac)
-            );
-            self.push_event(EventKind::Action, Some(ip), msg.clone());
-            self.set_toast(msg);
-            return;
-        }
-        match send_wake_on_lan(mac, bcast) {
-            Ok(()) => {
-                let msg = format!(
-                    "Sent Wake-on-LAN magic packet to {} ({ip})",
-                    format_mac(mac)
-                );
-                self.push_event(EventKind::Action, Some(ip), msg.clone());
-                self.set_toast(msg);
-            }
-            Err(err) => self.set_toast(err),
-        }
-    }
 }
 
 fn seed_initial_hosts(snap: &mut NetworkSnapshot, known: &KnownHostStore) {
     let now = epoch_now();
     let arp = read_arp_entries();
+    let etc_hosts = read_etc_hosts();
+    let ts_peers = read_tailscale_peers();
+    let ts_by_ip: HashMap<Ipv4Addr, _> = ts_peers.iter().map(|p| (p.ip, p.clone())).collect();
 
     for iface in &snap.interfaces {
         if iface.is_virtual {
             continue;
         }
         if let Some(ip) = iface.ipv4 {
+            let local_hostname = ts_by_ip
+                .get(&ip)
+                .map(|p| p.hostname.clone())
+                .or_else(|| clean_discovered_hostname(&snap.hostname));
             snap.hosts.push(Host {
                 ip,
                 ipv6: iface.ipv6_list.first().cloned(),
-                hostname: Some(snap.hostname.clone()),
-                nickname: Some("This Machine".to_string()),
+                hostname: local_hostname,
+                nickname: None,
                 mac: iface.mac,
                 oui_prefix: iface.mac.map(format_oui),
-                vendor: iface.vendor.clone(),
+                vendor: iface.vendor.clone().or_else(|| {
+                    if iface.name.starts_with("tailscale") {
+                        Some("Tailscale".to_string())
+                    } else {
+                        None
+                    }
+                }),
                 is_randomized_mac: false,
                 online: true,
                 trusted: true,
@@ -1458,8 +1003,10 @@ fn seed_initial_hosts(snap: &mut NetworkSnapshot, known: &KnownHostStore) {
                 snap.hosts.push(Host {
                     ip: gw,
                     ipv6: None,
-                    hostname: None,
-                    nickname: Some("Gateway".to_string()),
+                    hostname: etc_hosts
+                        .get(&gw)
+                        .and_then(|s| clean_discovered_hostname(s)),
+                    nickname: None,
                     mac: None,
                     oui_prefix: None,
                     vendor: None,
@@ -1484,6 +1031,42 @@ fn seed_initial_hosts(snap: &mut NetworkSnapshot, known: &KnownHostStore) {
                 });
             }
         }
+        let is_ts_iface = iface.name.starts_with("tailscale")
+            || (iface.prefix_len == 32 && iface.ipv4.is_some_and(|ip| ip.octets()[0] == 100));
+        if is_ts_iface {
+            for peer in &ts_peers {
+                if !peer.online || snap.hosts.iter().any(|h| h.ip == peer.ip) {
+                    continue;
+                }
+                snap.hosts.push(Host {
+                    ip: peer.ip,
+                    ipv6: None,
+                    hostname: Some(peer.hostname.clone()),
+                    nickname: None,
+                    mac: None,
+                    oui_prefix: None,
+                    vendor: Some("Tailscale Peer".to_string()),
+                    is_randomized_mac: false,
+                    online: true,
+                    trusted: true,
+                    role: DeviceRole::Host,
+                    arp_state: ArpState::Reachable,
+                    ttl: None,
+                    os_guess: peer.os.clone(),
+                    rtt_ms: None,
+                    rtt_history: Vec::new(),
+                    jitter_ms: None,
+                    packet_loss_pct: 0.0,
+                    ports: Vec::new(),
+                    first_seen_epoch: now,
+                    last_seen_epoch: now,
+                    discovered_tick: 0,
+                    subnet_cidr: iface.cidr.clone(),
+                    interface: iface.name.clone(),
+                    is_new: false,
+                });
+            }
+        }
     }
 
     for entry in arp {
@@ -1493,6 +1076,9 @@ fn seed_initial_hosts(snap: &mut NetworkSnapshot, known: &KnownHostStore) {
             .unwrap_or_else(|| "lan".to_string());
         let is_gw = iface_obj.is_some_and(|i| i.gateway == Some(entry.ip));
         let (vendor, rand) = entry.mac.map(lookup_vendor).unwrap_or((None, false));
+        let hostname = etc_hosts
+            .get(&entry.ip)
+            .and_then(|s| clean_discovered_hostname(s));
         if let Some(h) = snap.hosts.iter_mut().find(|h| h.ip == entry.ip) {
             h.mac = entry.mac;
             h.oui_prefix = entry.mac.map(format_oui);
@@ -1500,11 +1086,14 @@ fn seed_initial_hosts(snap: &mut NetworkSnapshot, known: &KnownHostStore) {
             h.is_randomized_mac = rand;
             h.arp_state = entry.state;
             h.ipv6 = entry.ipv6;
+            if h.hostname.is_none() {
+                h.hostname = hostname;
+            }
         } else {
             snap.hosts.push(Host {
                 ip: entry.ip,
                 ipv6: entry.ipv6,
-                hostname: None,
+                hostname: hostname.clone(),
                 nickname: None,
                 mac: entry.mac,
                 oui_prefix: entry.mac.map(format_oui),
@@ -1512,7 +1101,7 @@ fn seed_initial_hosts(snap: &mut NetworkSnapshot, known: &KnownHostStore) {
                 is_randomized_mac: rand,
                 online: true,
                 trusted: false,
-                role: infer_device_role(false, is_gw, vendor.as_deref(), None, &[]),
+                role: infer_device_role(false, is_gw, vendor.as_deref(), hostname.as_deref(), &[]),
                 arp_state: entry.state,
                 ttl: None,
                 os_guess: None,
@@ -1531,7 +1120,7 @@ fn seed_initial_hosts(snap: &mut NetworkSnapshot, known: &KnownHostStore) {
         }
     }
 
-    // Add offline saved hosts matching primary subnet so Wake-on-LAN is always 1 click away.
+    // Add offline saved hosts matching primary subnet when user gave them a nickname/bookmark.
     if let Some(primary) = snap
         .interfaces
         .iter()
@@ -1588,8 +1177,10 @@ fn apply_single_known_metadata(h: &mut Host, known: &KnownHostStore) {
         let key = format_mac(mac);
         if let Some(entry) = known.hosts.get(&key) {
             h.trusted = entry.trusted;
-            if entry.nickname.is_some() {
-                h.nickname = entry.nickname.clone();
+            if let Some(nick) = &entry.nickname {
+                if !nick.trim().is_empty() {
+                    h.nickname = Some(nick.clone());
+                }
             }
             h.is_new = !h.trusted && h.online;
         }
@@ -1597,8 +1188,14 @@ fn apply_single_known_metadata(h: &mut Host, known: &KnownHostStore) {
 }
 
 fn refresh_in_use_from_sockets(snap: &mut NetworkSnapshot) {
+    let mut local_ips: HashSet<Ipv4Addr> = HashSet::new();
+    for iface in &snap.interfaces {
+        if let Some(ip) = iface.ipv4 {
+            local_ips.insert(ip);
+        }
+    }
     for host in &mut snap.hosts {
-        let is_local = snap.interfaces.iter().any(|i| i.ipv4 == Some(host.ip));
+        let is_local = local_ips.contains(&host.ip);
         for port in &mut host.ports {
             if port.state != PortState::Open && port.state != PortState::InUse {
                 continue;
@@ -1606,7 +1203,8 @@ fn refresh_in_use_from_sockets(snap: &mut NetworkSnapshot) {
             let active = if is_local {
                 snap.local_sockets.iter().find(|s| {
                     s.state == crate::net::model::SocketState::Established
-                        && (s.local_port == port.port || s.remote_port == port.port)
+                        && s.local_port == port.port
+                        && (s.local_ip_v4.is_none() || s.local_ip_v4 == Some(host.ip))
                 })
             } else {
                 snap.local_sockets.iter().find(|s| {
@@ -1627,12 +1225,4 @@ fn refresh_in_use_from_sockets(snap: &mut NetworkSnapshot) {
             }
         }
     }
-}
-
-fn format_clock_now() -> String {
-    let secs = epoch_now() % 86_400;
-    let h = secs / 3600;
-    let m = (secs % 3600) / 60;
-    let s = secs % 60;
-    format!("{h:02}:{m:02}:{s:02}")
 }

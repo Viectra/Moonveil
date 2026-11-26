@@ -1,12 +1,10 @@
-//! Root UI shell: sidebar with Moonveil emblem, compact topbar, 5 views, splash, and floating modals.
+//! Root UI shell: sidebar with Moonveil emblem, compact topbar, 3 views, splash, and floating modals.
 
 pub mod hit;
 pub mod hosts;
-pub mod network;
 pub mod radar;
 pub mod settings;
 pub mod theme;
-pub mod watch;
 pub mod widgets;
 
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -68,7 +66,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Modal::CustomPorts { input, error } => {
             render_custom_ports_modal(frame, app, area, pal, &input, error.as_deref())
         }
-        Modal::Traceroute { ip } => render_traceroute_modal(frame, app, area, pal, ip),
     }
 }
 
@@ -76,8 +73,6 @@ fn render_active_tab(frame: &mut Frame, app: &mut App, body: Rect) {
     match app.tab {
         Tab::Hosts => hosts::render(frame, app, body),
         Tab::Radar => radar::render(frame, app, body),
-        Tab::Network => network::render(frame, app, body),
-        Tab::Watch => watch::render(frame, app, body),
         Tab::Settings => settings::render(frame, app, body),
     }
 }
@@ -266,9 +261,7 @@ fn render_sidebar(frame: &mut Frame, app: &mut App, area: Rect, pal: Palette) {
         let fg = if active { pal.accent_fg } else { pal.text };
         let count_hint = match tab {
             Tab::Hosts => format!("{hosts_online}"),
-            Tab::Network => format!("{}", app.visible_interfaces().len()),
-            Tab::Watch => format!("{}", app.timeline.len()),
-            _ => String::new(),
+            Tab::Radar | Tab::Settings => String::new(),
         };
         let label = format!(" {} {}", tab.icon(), tab.label());
         let pad = usize::from(inner.width).saturating_sub(
@@ -384,21 +377,6 @@ fn render_compact_topbar(frame: &mut Frame, app: &mut App, area: Rect, pal: Pale
         app.hits.register(r, ClickAction::SwitchTab(tab));
         x += w + 1;
     }
-
-    // Compact Mode toggle on right
-    let m_lbl = format!(" {} ", app.config.mode.label());
-    let mw = m_lbl.len() as u16;
-    if area.right() > x + mw + 2 {
-        let mr = Rect::new(area.right() - mw - 1, area.y, mw, 1);
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                m_lbl,
-                pal.pill_style(true, HitRegistry::is_hovered(mr, app.hover)),
-            ))),
-            mr,
-        );
-        app.hits.register(mr, ClickAction::ToggleMode);
-    }
 }
 
 fn render_status_footer(frame: &mut Frame, app: &App, area: Rect, pal: Palette) {
@@ -418,11 +396,7 @@ fn render_status_footer(frame: &mut Frame, app: &App, area: Rect, pal: Palette) 
             .last_duration_ms
             .map(|d| format!(" • Last scan {d}ms"))
             .unwrap_or_default();
-        format!(
-            "{} • {} Mode • 1-5 Views • m Mode • s Scan • / Search • ? Help{last}",
-            app.snapshot.privilege.description(),
-            app.config.mode.label()
-        )
+        format!("1-3 Views • s Scan • p Preset • / Search • n Rename • ? Help • q Quit{last}")
     };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -485,11 +459,7 @@ fn render_help_modal(frame: &mut Frame, app: &mut App, area: Rect, pal: Palette)
         ]),
         Line::raw(""),
         Line::from(Span::styled(
-            "1-5 / Tab      Switch views (Hosts, Radar, Network, Watch, Settings)",
-            Style::default().fg(pal.text_dim),
-        )),
-        Line::from(Span::styled(
-            "m              Toggle Normal Mode <-> Advanced Mode",
+            "1-3 / Tab      Switch views (Devices, Subnet Map, Settings)",
             Style::default().fg(pal.text_dim),
         )),
         Line::from(Span::styled(
@@ -497,27 +467,23 @@ fn render_help_modal(frame: &mut Frame, app: &mut App, area: Rect, pal: Palette)
             Style::default().fg(pal.text_dim),
         )),
         Line::from(Span::styled(
-            "p              Cycle scan preset (Quick, Top100, Full, Web/Dev, Custom)",
+            "p              Cycle port preset (Quick, Top 100, Full, Web/Dev, Custom)",
             Style::default().fg(pal.text_dim),
         )),
         Line::from(Span::styled(
-            "w              Toggle background Watch Mode",
+            "/              Search device name, IP, MAC, vendor, or port (port:22)",
             Style::default().fg(pal.text_dim),
         )),
         Line::from(Span::styled(
-            "/              Search (port:22 state:in-use state:closed vendor:apple)",
+            "n              Rename selected device nickname",
             Style::default().fg(pal.text_dim),
         )),
         Line::from(Span::styled(
-            "t / n          Trust toggle / Rename host nickname",
+            "j / k / ↑ / ↓  Navigate device list • Mouse wheel scrolls lists",
             Style::default().fg(pal.text_dim),
         )),
         Line::from(Span::styled(
-            "j / k / ↑ / ↓  Navigate host list • Mouse wheel scrolls any list",
-            Style::default().fg(pal.text_dim),
-        )),
-        Line::from(Span::styled(
-            "e              Export snapshot JSON • q / Esc to close",
+            "e              Export snapshot JSON • ? / q / Esc to close",
             Style::default().fg(pal.text_dim),
         )),
     ];
@@ -616,90 +582,4 @@ fn render_custom_ports_modal(
         Rect::new(inner.x, inner.bottom().saturating_sub(1), 16, 1),
         ClickAction::CloseModal,
     );
-}
-
-fn render_traceroute_modal(
-    frame: &mut Frame,
-    app: &mut App,
-    area: Rect,
-    pal: Palette,
-    ip: std::net::Ipv4Addr,
-) {
-    let modal = centered_rect(area, 62, 18);
-    frame.render_widget(Clear, modal);
-    frame.render_widget(
-        Block::default().style(Style::default().bg(pal.sidebar)),
-        modal,
-    );
-    let inner = inset_rect(modal, 2, 1);
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Min(4),
-            Constraint::Length(1),
-        ])
-        .split(inner);
-
-    let status = if app.trace_running {
-        "Tracing…"
-    } else {
-        "Done"
-    };
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                format!("Traceroute -> {ip}  "),
-                Style::default()
-                    .fg(pal.veil_peach)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(status, Style::default().fg(pal.moon_violet)),
-        ])),
-        rows[0],
-    );
-
-    let hop_lines: Vec<Line> = if app.trace_hops.is_empty() {
-        vec![Line::from(Span::styled(
-            "Probing route hops…",
-            Style::default().fg(pal.text_muted),
-        ))]
-    } else {
-        app.trace_hops
-            .iter()
-            .map(|h| {
-                let ip_s =
-                    h.ip.map(|x| x.to_string())
-                        .unwrap_or_else(|| "*".to_string());
-                let name_s = h.hostname.as_deref().unwrap_or("");
-                let rtt_s = h
-                    .rtt_ms
-                    .map(|r| format!("{r:.2} ms"))
-                    .unwrap_or_else(|| "timeout".to_string());
-                Line::from(vec![
-                    Span::styled(
-                        format!(" {:>2}  ", h.ttl),
-                        Style::default().fg(pal.text_muted),
-                    ),
-                    Span::styled(format!("{ip_s:<16}"), Style::default().fg(pal.text)),
-                    Span::styled(
-                        format!("{:<22}", truncate_str(name_s, 20)),
-                        Style::default().fg(pal.text_dim),
-                    ),
-                    Span::styled(rtt_s, Style::default().fg(pal.ok)),
-                ])
-            })
-            .collect()
-    };
-    frame.render_widget(Paragraph::new(hop_lines), rows[1]);
-
-    let close_r = Rect::new(rows[2].x, rows[2].y, 12, 1);
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            " Close (Esc) ",
-            pal.pill_style(true, false),
-        ))),
-        close_r,
-    );
-    app.hits.register(close_r, ClickAction::CloseModal);
 }

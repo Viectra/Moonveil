@@ -1,4 +1,4 @@
-//! Settings tab: Mode selector, scan presets/concurrency/timeouts, custom port range, and Theme Studio.
+//! Settings tab: port presets, discovery toggles, snapshot exports, and theme customization.
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -8,7 +8,7 @@ use ratatui::Frame;
 
 use crate::app::App;
 use crate::config::{AccentId, ThemeId};
-use crate::net::model::{ScanMode, ScanPreset};
+use crate::net::model::{ExportFormat, ScanPreset};
 use crate::ui::hit::{ClickAction, HitRegistry, ScrollTarget};
 use crate::ui::hosts::push_pill;
 use crate::ui::theme::{draw_card_header, inset_rect, truncate_str, Palette};
@@ -52,9 +52,13 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn render_scan_settings(frame: &mut Frame, app: &mut App, area: Rect, pal: Palette) {
-    let r = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
+    let r = if area.width >= 48 {
+        Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height)
+    } else {
+        area
+    };
     frame.render_widget(Block::default().style(pal.card_style()), r);
-    let body = draw_card_header(frame, pal, r, "Scanner & Recon Preferences", None);
+    let body = draw_card_header(frame, pal, r, "Scanner & Exports", None);
     let inner = inset_rect(body, 1, 0);
     if inner.height < 10 {
         return;
@@ -62,38 +66,26 @@ fn render_scan_settings(frame: &mut Frame, app: &mut App, area: Rect, pal: Palet
 
     let mut y = inner.y;
 
-    // UI Mode
-    draw_label(frame, inner.x, y, "Interface Density Mode", pal);
-    y += 1;
-    let mut x = inner.x;
-    for mode in [ScanMode::Normal, ScanMode::Advanced] {
-        x = push_pill(
-            frame,
-            app,
-            x,
-            y,
-            inner.right(),
-            &format!(" {} ({}) ", mode.label(), mode.subtitle()),
-            app.config.mode == mode,
-            pal,
-            ClickAction::SetMode(mode),
-        );
-        x += 1;
-    }
-    y += 2;
-
-    // Default Preset
     draw_label(frame, inner.x, y, "Default Port Preset", pal);
     y += 1;
-    x = inner.x;
+    let mut x = inner.x;
     for &preset in ScanPreset::ALL {
+        let lbl = format!(" {} ", preset.short_label());
+        let w = unicode_width::UnicodeWidthStr::width(lbl.as_str()) as u16;
+        if x + w > inner.right() {
+            x = inner.x;
+            y += 1;
+        }
+        if y >= inner.bottom() {
+            return;
+        }
         x = push_pill(
             frame,
             app,
             x,
             y,
             inner.right(),
-            &format!(" {} ", preset.short_label()),
+            &lbl,
             app.config.default_preset == preset,
             pal,
             ClickAction::SetPreset(preset),
@@ -102,11 +94,16 @@ fn render_scan_settings(frame: &mut Frame, app: &mut App, area: Rect, pal: Palet
     }
     y += 2;
 
-    // Custom Port Expression
     if y + 1 < inner.bottom() {
         draw_label(frame, inner.x, y, "Custom Port Range (click to edit)", pal);
         y += 1;
-        let lbl = format!(" {} ", truncate_str(&app.config.custom_ports, 36));
+        let lbl = format!(
+            " {} ",
+            truncate_str(
+                &app.config.custom_ports,
+                usize::from(inner.width.saturating_sub(2))
+            )
+        );
         let _ = push_pill(
             frame,
             app,
@@ -121,46 +118,9 @@ fn render_scan_settings(frame: &mut Frame, app: &mut App, area: Rect, pal: Palet
         y += 2;
     }
 
-    // Engine knobs
-    if y + 4 < inner.bottom() {
-        x = inner.x;
-        x = push_pill(
-            frame,
-            app,
-            x,
-            y,
-            inner.right(),
-            &format!(" Concurrency: {} ", app.config.concurrency),
-            false,
-            pal,
-            ClickAction::CycleConcurrency,
-        );
-        x += 1;
-        x = push_pill(
-            frame,
-            app,
-            x,
-            y,
-            inner.right(),
-            &format!(" Timeout: {}ms ", app.config.timeout_ms),
-            false,
-            pal,
-            ClickAction::CycleTimeout,
-        );
-        x += 1;
-        let _ = push_pill(
-            frame,
-            app,
-            x,
-            y,
-            inner.right(),
-            &format!(" Watch: {}s ", app.config.watch_interval_secs),
-            false,
-            pal,
-            ClickAction::CycleWatchInterval,
-        );
-        y += 2;
-
+    if y + 1 < inner.bottom() {
+        draw_label(frame, inner.x, y, "Discovery Options", pal);
+        y += 1;
         x = inner.x;
         x = push_pill(
             frame,
@@ -193,12 +153,46 @@ fn render_scan_settings(frame: &mut Frame, app: &mut App, area: Rect, pal: Palet
             pal,
             ClickAction::ToggleVirtualIfaces,
         );
+        y += 2;
+    }
+
+    if y + 1 < inner.bottom() {
+        draw_label(frame, inner.x, y, "Export Network Snapshot", pal);
+        y += 1;
+        x = inner.x;
+        for fmt in [
+            ExportFormat::Json,
+            ExportFormat::Csv,
+            ExportFormat::Markdown,
+        ] {
+            let lbl = format!(" Export {} ", fmt.label());
+            let w = unicode_width::UnicodeWidthStr::width(lbl.as_str()) as u16;
+            if x + w > inner.right() {
+                x = inner.x;
+                y += 1;
+            }
+            if y >= inner.bottom() {
+                break;
+            }
+            x = push_pill(
+                frame,
+                app,
+                x,
+                y,
+                inner.right(),
+                &lbl,
+                false,
+                pal,
+                ClickAction::ExportSnapshot(fmt),
+            );
+            x += 1;
+        }
     }
 }
 
 fn render_appearance_settings(frame: &mut Frame, app: &mut App, area: Rect, pal: Palette) {
     frame.render_widget(Block::default().style(pal.card_style()), area);
-    let body = draw_card_header(frame, pal, area, "Theme & Visual Effects", None);
+    let body = draw_card_header(frame, pal, area, "Appearance", None);
     let inner = inset_rect(body, 1, 0);
     if inner.height < 10 {
         return;
@@ -235,7 +229,7 @@ fn render_appearance_settings(frame: &mut Frame, app: &mut App, area: Rect, pal:
     y += 2;
 
     if y + 2 < inner.bottom() {
-        draw_label(frame, inner.x, y, "Accent Swatch", pal);
+        draw_label(frame, inner.x, y, "Accent Color", pal);
         y += 1;
         x = inner.x;
         for &accent in AccentId::ALL {
@@ -282,7 +276,7 @@ fn render_appearance_settings(frame: &mut Frame, app: &mut App, area: Rect, pal:
         y += 2;
     }
 
-    if y + 2 < inner.bottom() {
+    if y < inner.bottom() {
         x = inner.x;
         x = push_pill(
             frame,
@@ -298,22 +292,6 @@ fn render_appearance_settings(frame: &mut Frame, app: &mut App, area: Rect, pal:
             app.config.animations,
             pal,
             ClickAction::ToggleAnimations,
-        );
-        x += 1;
-        x = push_pill(
-            frame,
-            app,
-            x,
-            y,
-            inner.right(),
-            if app.config.splash {
-                " ● Splash ON "
-            } else {
-                " - Splash OFF "
-            },
-            app.config.splash,
-            pal,
-            ClickAction::ToggleSplash,
         );
         x += 1;
         let _ = push_pill(

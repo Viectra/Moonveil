@@ -488,6 +488,85 @@ pub fn read_arp_entries() -> Vec<ArpEntry> {
     entries
 }
 
+/// Tailscale peer metadata retrieved from `tailscale status --json`.
+#[derive(Debug, Clone)]
+pub struct TailscalePeer {
+    pub ip: Ipv4Addr,
+    pub hostname: String,
+    pub os: Option<String>,
+    pub online: bool,
+}
+
+/// Reads active Tailscale node & peers via `tailscale status --json` when available.
+pub fn read_tailscale_peers() -> Vec<TailscalePeer> {
+    let Ok(output) = Command::new("tailscale")
+        .args(["status", "--json"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let Ok(root) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+        return Vec::new();
+    };
+
+    let mut peers = Vec::new();
+    if let Some(self_obj) = root.get("Self") {
+        if let Some(p) = parse_tailscale_peer(self_obj, true) {
+            peers.push(p);
+        }
+    }
+    if let Some(peer_map) = root.get("Peer").and_then(|v| v.as_object()) {
+        for peer_obj in peer_map.values() {
+            if let Some(p) = parse_tailscale_peer(peer_obj, false) {
+                peers.push(p);
+            }
+        }
+    }
+    peers.sort_by_key(|p| p.ip);
+    peers.dedup_by_key(|p| p.ip);
+    peers
+}
+
+fn parse_tailscale_peer(obj: &serde_json::Value, is_self: bool) -> Option<TailscalePeer> {
+    let ip = obj
+        .get("TailscaleIPs")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| {
+            arr.iter()
+                .filter_map(|item| item.as_str())
+                .find_map(|s| s.parse::<Ipv4Addr>().ok())
+        })?;
+    let raw_name = obj
+        .get("HostName")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            obj.get("DNSName")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.split('.').next())
+        })?;
+    let hostname = crate::net::model::clean_discovered_hostname(raw_name)?;
+    let os = obj
+        .get("OS")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_string());
+    let online = if is_self {
+        true
+    } else {
+        obj.get("Online").and_then(|v| v.as_bool()).unwrap_or(false)
+    };
+    Some(TailscalePeer {
+        ip,
+        hostname,
+        os,
+        online,
+    })
+}
+
 /// Reads active TCP/UDP sockets from `/proc/net/{tcp,tcp6,udp,udp6}` and maps inodes to PIDs.
 pub fn collect_local_sockets(resolve_pids: bool) -> Vec<LocalSocket> {
     let inode_map = if resolve_pids {
@@ -537,7 +616,7 @@ fn parse_proc_net_sockets(
         if cols.len() < 10 {
             continue;
         }
-        let Some((local_addr, local_port, _)) = parse_hex_endpoint(cols[1], is_v6) else {
+        let Some((local_addr, local_port, local_ip_v4)) = parse_hex_endpoint(cols[1], is_v6) else {
             continue;
         };
         let Some((remote_addr, remote_port, remote_ip_v4)) = parse_hex_endpoint(cols[2], is_v6)
@@ -561,6 +640,7 @@ fn parse_proc_net_sockets(
         out.push(LocalSocket {
             proto: proto.to_string(),
             local_addr,
+            local_ip_v4,
             local_port,
             remote_addr,
             remote_ip_v4,

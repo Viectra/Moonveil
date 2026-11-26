@@ -12,12 +12,13 @@ use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::{mpsc, Semaphore};
 
 use crate::net::linux::{
-    epoch_now, network_addr, prefix_mask, read_arp_entries, read_etc_hosts, ArpEntry,
+    epoch_now, network_addr, prefix_mask, read_arp_entries, read_etc_hosts, read_tailscale_peers,
+    ArpEntry, TailscalePeer,
 };
 use crate::net::model::{
-    format_mac, format_oui, infer_device_role, infer_os_from_ttl, ports_for_preset, service_info,
-    ArpState, Host, LocalSocket, NetworkInterface, PortInfo, PortState, PrivilegeLevel, Proto,
-    ScanPreset, SocketState, TracerouteHop,
+    clean_discovered_hostname, format_mac, format_oui, infer_device_role, infer_os_from_ttl,
+    ports_for_preset, service_info, ArpState, Host, LocalSocket, NetworkInterface, PortInfo,
+    PortState, PrivilegeLevel, Proto, ScanPreset, SocketState, TracerouteHop,
 };
 use crate::net::oui::lookup_vendor;
 
@@ -137,8 +138,15 @@ pub async fn run_scan(
     let started = Instant::now();
     let etc_hosts = read_etc_hosts();
     let initial_arp = read_arp_entries();
+    let ts_peers = tokio::task::spawn_blocking(read_tailscale_peers)
+        .await
+        .unwrap_or_default();
+    let ts_by_ip: HashMap<Ipv4Addr, TailscalePeer> =
+        ts_peers.iter().map(|p| (p.ip, p.clone())).collect();
     let ports_to_scan = ports_for_preset(cfg.preset, &cfg.custom_ports);
     let iface = &cfg.interface;
+    let is_tailscale_iface = iface.name.starts_with("tailscale")
+        || (iface.prefix_len == 32 && iface.ipv4.is_some_and(|ip| ip.octets()[0] == 100));
 
     let mut discovered_hosts: HashMap<Ipv4Addr, Host> = HashMap::new();
     let now = epoch_now();
@@ -153,19 +161,28 @@ pub async fn run_scan(
         base.last_seen_epoch = now;
         discovered_hosts.insert(target_ip, base);
     } else {
-        let targets = compute_scan_targets(
+        let mut targets = compute_scan_targets(
             iface,
             &initial_arp,
             &cfg.local_sockets,
             cfg.radar_page_offset,
         );
+        if is_tailscale_iface {
+            let mut set: BTreeSet<Ipv4Addr> = targets.into_iter().collect();
+            for peer in &ts_peers {
+                if peer.online {
+                    set.insert(peer.ip);
+                }
+            }
+            targets = set.into_iter().collect();
+        }
         let total = targets.len();
         let _ = tx.send(EngineEvent::ScanStarted {
             total,
             phase: format!("Discovering hosts on {}", iface.cidr),
         });
 
-        // Immediately seed local host and known ARP hosts for instant responsiveness.
+        // Immediately seed local host for instant responsiveness.
         if let Some(local_ip) = iface.ipv4 {
             let mut h = cfg
                 .existing_hosts
@@ -178,14 +195,21 @@ pub async fn run_scan(
             h.vendor = iface.vendor.clone().or(h.vendor);
             h.arp_state = ArpState::Local;
             h.ttl = Some(64);
-            h.os_guess = Some("Linux (This Machine)".to_string());
+            h.os_guess = Some("Linux".to_string());
             h.rtt_ms = Some(0.05);
-            if h.hostname.is_none() {
-                h.hostname = Some(
-                    std::fs::read_to_string("/etc/hostname")
-                        .map(|s| s.trim().to_string())
-                        .unwrap_or_else(|_| "localhost".to_string()),
-                );
+            if h.hostname
+                .as_deref()
+                .and_then(clean_discovered_hostname)
+                .is_none()
+            {
+                h.hostname = ts_by_ip
+                    .get(&local_ip)
+                    .map(|p| p.hostname.clone())
+                    .or_else(|| {
+                        std::fs::read_to_string("/etc/hostname")
+                            .ok()
+                            .and_then(|s| clean_discovered_hostname(&s))
+                    });
             }
             h.role = infer_device_role(
                 true,
@@ -300,35 +324,69 @@ pub async fn run_scan(
                 entry.is_randomized_mac = randomized;
             }
         }
+
+        if is_tailscale_iface {
+            for peer in &ts_peers {
+                if !peer.online {
+                    continue;
+                }
+                let entry = discovered_hosts
+                    .entry(peer.ip)
+                    .or_insert_with(|| make_skeleton_host(peer.ip, iface, now));
+                entry.online = true;
+                entry.last_seen_epoch = now;
+                if entry.vendor.is_none() {
+                    entry.vendor = Some("Tailscale Peer".to_string());
+                }
+                if entry.os_guess.is_none() {
+                    entry.os_guess = peer.os.clone();
+                }
+                entry.hostname = Some(peer.hostname.clone());
+            }
+        }
     }
 
-    // Resolve hostnames concurrently via /etc/hosts, reverse DNS, and mDNS.
+    // Apply known Tailscale / /etc/hosts names and drop invalid placeholder hostnames.
+    for (ip, host) in &mut discovered_hosts {
+        if let Some(cleaned) = host.hostname.as_deref().and_then(clean_discovered_hostname) {
+            host.hostname = Some(cleaned);
+        } else {
+            host.hostname = None;
+        }
+        if host.hostname.is_none() {
+            if let Some(ts) = ts_by_ip.get(ip) {
+                host.hostname = Some(ts.hostname.clone());
+                if host.os_guess.is_none() {
+                    host.os_guess = ts.os.clone();
+                }
+            } else if let Some(etc_name) =
+                etc_hosts.get(ip).and_then(|s| clean_discovered_hostname(s))
+            {
+                host.hostname = Some(etc_name);
+            }
+        }
+    }
+
+    // Resolve remaining hostnames concurrently via Router DNS PTR, mDNS, NetBIOS, LLMNR, and libc.
     let online_ips: Vec<Ipv4Addr> = discovered_hosts.keys().copied().collect();
     let name_sem = Arc::new(Semaphore::new(32));
     let mut name_tasks = Vec::with_capacity(online_ips.len());
     for ip in online_ips {
-        let host_entry = discovered_hosts.get(&ip).cloned();
-        if let Some(existing_name) = etc_hosts.get(&ip) {
-            if let Some(h) = discovered_hosts.get_mut(&ip) {
-                if h.hostname.is_none() {
-                    h.hostname = Some(existing_name.clone());
-                }
-            }
-            continue;
-        }
-        if host_entry
-            .as_ref()
+        if discovered_hosts
+            .get(&ip)
             .and_then(|h| h.hostname.as_ref())
             .is_some()
         {
             continue;
         }
         let sem_c = name_sem.clone();
+        let gw = iface.gateway;
+        let dns_c = iface.dns_servers.clone();
         name_tasks.push(tokio::spawn(async move {
             let Ok(_p) = sem_c.acquire().await else {
                 return (ip, None);
             };
-            let resolved = resolve_hostname(ip).await;
+            let resolved = resolve_hostname(ip, gw, &dns_c).await;
             (ip, resolved)
         }));
     }
@@ -340,34 +398,53 @@ pub async fn run_scan(
         }
     }
 
-    // Port scan every online host.
+    // Port scan every online host (augmenting local interface with all bound listening TCP ports).
     let mut scan_ips: Vec<Ipv4Addr> = discovered_hosts.keys().copied().collect();
     scan_ips.sort();
-    let total_port_jobs = scan_ips.len() * ports_to_scan.len();
+    let mut per_host_ports: Vec<(Ipv4Addr, Vec<u16>, bool)> = Vec::with_capacity(scan_ips.len());
+    let mut total_port_jobs = 0_usize;
+    for ip in scan_ips {
+        let is_local = iface.ipv4 == Some(ip);
+        let host_ports = if is_local {
+            let mut set: BTreeSet<u16> = ports_to_scan.iter().copied().collect();
+            for sock in &cfg.local_sockets {
+                if sock.state == SocketState::Listen
+                    && sock.proto.starts_with("TCP")
+                    && (sock.local_ip_v4.is_none() || sock.local_ip_v4 == Some(ip))
+                    && sock.local_port > 0
+                {
+                    set.insert(sock.local_port);
+                }
+            }
+            set.into_iter().collect()
+        } else {
+            ports_to_scan.clone()
+        };
+        total_port_jobs += host_ports.len();
+        per_host_ports.push((ip, host_ports, is_local));
+    }
     let _ = tx.send(EngineEvent::ScanStarted {
         total: total_port_jobs.max(1),
         phase: format!(
             "Scanning {} ports across {} hosts",
             ports_to_scan.len(),
-            scan_ips.len()
+            per_host_ports.len()
         ),
     });
 
     let port_sem = Arc::new(Semaphore::new(cfg.concurrency.clamp(32, 512)));
     let port_probed = Arc::new(AtomicUsize::new(0));
-    let mut host_tasks = Vec::with_capacity(scan_ips.len());
+    let mut host_tasks = Vec::with_capacity(per_host_ports.len());
 
-    for ip in scan_ips {
+    for (ip, ports_c, is_local) in per_host_ports {
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        let ports_c = ports_to_scan.clone();
         let sem_c = port_sem.clone();
         let cancel_c = cancel.clone();
         let tx_c = tx.clone();
         let probed_c = port_probed.clone();
         let sockets_c = cfg.local_sockets.clone();
-        let is_local = iface.ipv4 == Some(ip);
         let timeout_ms = cfg.timeout_ms.clamp(80, 1500);
         let grab_banners = cfg.grab_banners;
 
@@ -399,6 +476,11 @@ pub async fn run_scan(
                     .filter(|p| matches!(p.state, PortState::Open | PortState::InUse))
                     .count();
                 host.ports = ports;
+                if host.hostname.is_none() {
+                    if let Some(cert_host) = extract_hostname_from_ports(&host.ports) {
+                        host.hostname = Some(cert_host);
+                    }
+                }
                 let is_local = iface.ipv4 == Some(ip);
                 let is_gw = iface.gateway == Some(ip);
                 host.role = infer_device_role(
@@ -463,16 +545,21 @@ async fn scan_host_ports(
     total_jobs: usize,
     tx: mpsc::UnboundedSender<EngineEvent>,
 ) -> Vec<PortInfo> {
+    let host_sem = Arc::new(Semaphore::new(64));
     let mut handles = Vec::with_capacity(ports.len());
     for &port in ports {
         if cancel.load(Ordering::Relaxed) {
             break;
         }
         let sem_c = sem.clone();
+        let host_sem_c = host_sem.clone();
         let cancel_c = cancel.clone();
         let probed_c = probed.clone();
         let tx_c = tx.clone();
         handles.push(tokio::spawn(async move {
+            let Ok(_h_permit) = host_sem_c.acquire().await else {
+                return None;
+            };
             let Ok(_permit) = sem_c.acquire().await else {
                 return None;
             };
@@ -512,10 +599,11 @@ fn enrich_port_with_local_sockets(
     local_sockets: &[LocalSocket],
 ) {
     if is_local {
-        // Check for established sessions first (In Use).
+        // Check for established sessions on this host's local port (not outbound remote ports).
         if let Some(sock) = local_sockets.iter().find(|s| {
             s.state == SocketState::Established
-                && (s.local_port == info.port || s.remote_port == info.port)
+                && s.local_port == info.port
+                && (s.local_ip_v4.is_none() || s.local_ip_v4 == Some(host_ip))
         }) {
             if info.state == PortState::Open {
                 info.state = PortState::InUse;
@@ -526,10 +614,11 @@ fn enrich_port_with_local_sockets(
             return;
         }
         // Attach process name/PID for local listening sockets.
-        if let Some(sock) = local_sockets
-            .iter()
-            .find(|s| s.state == SocketState::Listen && s.local_port == info.port)
-        {
+        if let Some(sock) = local_sockets.iter().find(|s| {
+            s.state == SocketState::Listen
+                && s.local_port == info.port
+                && (s.local_ip_v4.is_none() || s.local_ip_v4 == Some(host_ip))
+        }) {
             info.pid = sock.pid;
             info.process = sock.process.clone();
         }
@@ -557,8 +646,15 @@ pub async fn probe_single_port(
     let addr = SocketAddr::new(IpAddr::V4(ip), port);
     let (svc, desc) = service_info(port);
     let t0 = Instant::now();
-    let res =
+    let mut res =
         tokio::time::timeout(Duration::from_millis(timeout_ms), TcpStream::connect(addr)).await;
+    if res.is_err() && port < 10_000 {
+        res = tokio::time::timeout(
+            Duration::from_millis(220.max(timeout_ms)),
+            TcpStream::connect(addr),
+        )
+        .await;
+    }
     let rtt = t0.elapsed().as_secs_f64() * 1000.0;
 
     match res {
@@ -640,20 +736,9 @@ async fn read_service_banner(
     let is_tls = matches!(port, 443 | 8443 | 9443 | 8006);
 
     if is_http {
-        let req = format!(
-            "GET / HTTP/1.0\r\nHost: {ip}\r\nUser-Agent: Moonveil/0.1\r\nConnection: close\r\n\r\n"
-        );
-        let _ = tokio::time::timeout(Duration::from_millis(180), stream.write_all(req.as_bytes()))
-            .await;
-        if let Ok(Ok(n)) =
-            tokio::time::timeout(Duration::from_millis(260), stream.read(&mut buf)).await
-        {
-            if n > 0 {
-                let raw = &buf[..n];
-                return (Some(summarize_http_banner(raw)), Some(hex_snippet(raw)));
-            }
-        }
-        return (None, None);
+        return probe_http_banner(stream, ip, 180, 260, false)
+            .await
+            .unwrap_or((None, None));
     }
 
     if is_tls {
@@ -671,7 +756,7 @@ async fn read_service_banner(
     }
 
     // Greeting-first protocols (SSH, FTP, SMTP, Redis, MySQL, etc.).
-    if let Ok(Ok(n)) = tokio::time::timeout(Duration::from_millis(220), stream.read(&mut buf)).await
+    if let Ok(Ok(n)) = tokio::time::timeout(Duration::from_millis(150), stream.read(&mut buf)).await
     {
         if n > 0 {
             let raw = &buf[..n];
@@ -681,8 +766,43 @@ async fn read_service_banner(
                 Some(hex_snippet(raw)),
             );
         }
+        return (None, None);
     }
-    (None, None)
+
+    // Fallback HTTP probe for web servers running on arbitrary ports (e.g. 8765).
+    probe_http_banner(stream, ip, 150, 200, true)
+        .await
+        .unwrap_or((None, None))
+}
+
+async fn probe_http_banner(
+    stream: &mut TcpStream,
+    ip: Ipv4Addr,
+    write_ms: u64,
+    read_ms: u64,
+    require_http_prefix: bool,
+) -> Option<(Option<String>, Option<String>)> {
+    let mut buf = [0u8; 1024];
+    let req = format!(
+        "GET / HTTP/1.0\r\nHost: {ip}\r\nUser-Agent: Moonveil/0.1\r\nConnection: close\r\n\r\n"
+    );
+    let _ = tokio::time::timeout(
+        Duration::from_millis(write_ms),
+        stream.write_all(req.as_bytes()),
+    )
+    .await;
+    if let Ok(Ok(n)) =
+        tokio::time::timeout(Duration::from_millis(read_ms), stream.read(&mut buf)).await
+    {
+        if n > 0 {
+            let raw = &buf[..n];
+            if require_http_prefix && !raw.starts_with(b"HTTP/") {
+                return None;
+            }
+            return Some((Some(summarize_http_banner(raw)), Some(hex_snippet(raw))));
+        }
+    }
+    None
 }
 
 fn summarize_http_banner(raw: &[u8]) -> String {
@@ -1014,11 +1134,64 @@ fn internet_checksum(data: &[u8]) -> u16 {
     !(sum as u16)
 }
 
-async fn resolve_hostname(ip: Ipv4Addr) -> Option<String> {
-    if let Ok(Some(name)) = tokio::task::spawn_blocking(move || reverse_dns_blocking(ip)).await {
+async fn resolve_hostname(
+    ip: Ipv4Addr,
+    gateway: Option<Ipv4Addr>,
+    dns_servers: &[String],
+) -> Option<String> {
+    if let Some(gw) = gateway {
+        if let Some(name) = dns_ptr_lookup(gw, 53, ip, 180).await {
+            return Some(name);
+        }
+    }
+    for ns in dns_servers {
+        if let Ok(ns_ip) = ns.parse::<Ipv4Addr>() {
+            if !ns_ip.is_loopback() && Some(ns_ip) != gateway {
+                if let Some(name) = dns_ptr_lookup(ns_ip, 53, ip, 180).await {
+                    return Some(name);
+                }
+            }
+        }
+    }
+    if let Some(name) = mdns_reverse_lookup(ip).await {
         return Some(name);
     }
-    mdns_reverse_lookup(ip).await
+    if let Some(name) = nbns_lookup(ip).await {
+        return Some(name);
+    }
+    if let Some(name) = dns_ptr_lookup(ip, 5355, ip, 140).await {
+        return Some(name);
+    }
+    if let Ok(Some(name)) = tokio::task::spawn_blocking(move || reverse_dns_blocking(ip)).await {
+        return clean_discovered_hostname(&name);
+    }
+    None
+}
+
+fn extract_hostname_from_ports(ports: &[PortInfo]) -> Option<String> {
+    for p in ports {
+        let Some(banner) = &p.banner else {
+            continue;
+        };
+        let Some((_, after)) = banner.split_once("cert:") else {
+            continue;
+        };
+        let candidate = after.split_whitespace().next().unwrap_or("");
+        if candidate.starts_with("*.") {
+            continue;
+        }
+        let lower = candidate.to_ascii_lowercase();
+        let dot_count = candidate.matches('.').count();
+        let is_local =
+            lower.ends_with(".local") || lower.ends_with(".lan") || lower.ends_with(".home");
+        if dot_count > 2 && !is_local {
+            continue;
+        }
+        if let Some(clean) = clean_discovered_hostname(candidate) {
+            return Some(clean);
+        }
+    }
+    None
 }
 
 pub(crate) fn reverse_dns_blocking(ip: Ipv4Addr) -> Option<String> {
@@ -1054,7 +1227,7 @@ pub(crate) fn reverse_dns_blocking(ip: Ipv4Addr) -> Option<String> {
     None
 }
 
-async fn mdns_reverse_lookup(ip: Ipv4Addr) -> Option<String> {
+fn build_dns_ptr_query(ip: Ipv4Addr, recursion_desired: bool) -> Vec<u8> {
     let octets = ip.octets();
     let labels = [
         octets[3].to_string(),
@@ -1064,9 +1237,10 @@ async fn mdns_reverse_lookup(ip: Ipv4Addr) -> Option<String> {
         "in-addr".to_string(),
         "arpa".to_string(),
     ];
+    let flags_hi = if recursion_desired { 0x01 } else { 0x00 };
     let mut pkt = vec![
         0x4D, 0x56, // ID
-        0x00, 0x00, // Standard query
+        flags_hi, 0x00, // Standard query
         0x00, 0x01, // QDCOUNT = 1
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ];
@@ -1076,15 +1250,92 @@ async fn mdns_reverse_lookup(ip: Ipv4Addr) -> Option<String> {
     }
     pkt.push(0);
     pkt.extend_from_slice(&[0x00, 0x0C, 0x00, 0x01]); // PTR, IN
+    pkt
+}
 
+async fn dns_ptr_lookup(
+    server: Ipv4Addr,
+    port: u16,
+    target_ip: Ipv4Addr,
+    timeout_ms: u64,
+) -> Option<String> {
+    let pkt = build_dns_ptr_query(target_ip, port == 53);
     let sock = UdpSocket::bind("0.0.0.0:0").await.ok()?;
-    sock.send_to(&pkt, "224.0.0.251:5353").await.ok()?;
+    sock.send_to(&pkt, (server, port)).await.ok()?;
     let mut buf = [0u8; 512];
-    let (n, _) = tokio::time::timeout(Duration::from_millis(160), sock.recv_from(&mut buf))
+    let (n, _) = tokio::time::timeout(Duration::from_millis(timeout_ms), sock.recv_from(&mut buf))
         .await
         .ok()?
         .ok()?;
-    parse_dns_ptr_name(&buf[..n])
+    let raw = parse_dns_ptr_name(&buf[..n])?;
+    clean_discovered_hostname(&raw)
+}
+
+async fn mdns_reverse_lookup(ip: Ipv4Addr) -> Option<String> {
+    let pkt = build_dns_ptr_query(ip, false);
+    let sock = UdpSocket::bind("0.0.0.0:0").await.ok()?;
+    let _ = sock.send_to(&pkt, (ip, 5353)).await;
+    let _ = sock.send_to(&pkt, "224.0.0.251:5353").await;
+    let mut buf = [0u8; 512];
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(180);
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return None;
+        }
+        let rem = deadline - now;
+        let Ok(Ok((n, _))) = tokio::time::timeout(rem, sock.recv_from(&mut buf)).await else {
+            return None;
+        };
+        if let Some(raw) = parse_dns_ptr_name(&buf[..n]) {
+            if let Some(clean) = clean_discovered_hostname(&raw) {
+                return Some(clean);
+            }
+        }
+    }
+}
+
+async fn nbns_lookup(ip: Ipv4Addr) -> Option<String> {
+    // 50-byte NBSTAT '*' query for NetBIOS Node Status on UDP/137.
+    let mut pkt = Vec::with_capacity(50);
+    pkt.extend_from_slice(&[
+        0x4D, 0x57, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20,
+    ]);
+    pkt.extend_from_slice(b"CKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+    pkt.extend_from_slice(&[0x00, 0x00, 0x21, 0x00, 0x01]);
+
+    let sock = UdpSocket::bind("0.0.0.0:0").await.ok()?;
+    sock.send_to(&pkt, (ip, 137)).await.ok()?;
+    let mut buf = [0u8; 512];
+    let (n, _) = tokio::time::timeout(Duration::from_millis(180), sock.recv_from(&mut buf))
+        .await
+        .ok()?
+        .ok()?;
+    if n < 57 {
+        return None;
+    }
+    let num_names = usize::from(buf[56]);
+    let mut off = 57_usize;
+    for _ in 0..num_names {
+        if off + 18 > n {
+            break;
+        }
+        let name_type = buf[off + 15];
+        let flags = buf[off + 16];
+        let is_group = (flags & 0x80) != 0;
+        if !is_group && matches!(name_type, 0x00 | 0x20) {
+            let raw_name: String = buf[off..off + 15]
+                .iter()
+                .filter(|&&b| (0x20..=0x7E).contains(&b))
+                .map(|&b| b as char)
+                .collect();
+            if let Some(clean) = clean_discovered_hostname(&raw_name) {
+                return Some(clean);
+            }
+        }
+        off += 18;
+    }
+    None
 }
 
 fn parse_dns_ptr_name(pkt: &[u8]) -> Option<String> {
@@ -1095,23 +1346,30 @@ fn parse_dns_ptr_name(pkt: &[u8]) -> Option<String> {
     if ancount == 0 {
         return None;
     }
-    // Skip question section starting at byte 12.
     let mut idx = skip_dns_name(pkt, 12)?;
     idx += 4; // QTYPE + QCLASS
-    if idx + 12 > pkt.len() {
-        return None;
+    for _ in 0..ancount {
+        if idx >= pkt.len() {
+            break;
+        }
+        idx = skip_dns_name(pkt, idx)?;
+        if idx + 10 > pkt.len() {
+            break;
+        }
+        let rtype = u16::from_be_bytes([pkt[idx], pkt[idx + 1]]);
+        let rdlen = u16::from_be_bytes([pkt[idx + 8], pkt[idx + 9]]) as usize;
+        let rdata_start = idx + 10;
+        if rdata_start + rdlen > pkt.len() {
+            break;
+        }
+        if rtype == 12 {
+            if let Some(name) = read_dns_name(pkt, rdata_start) {
+                return Some(name);
+            }
+        }
+        idx = rdata_start + rdlen;
     }
-    idx = skip_dns_name(pkt, idx)?;
-    if idx + 10 > pkt.len() {
-        return None;
-    }
-    let rtype = u16::from_be_bytes([pkt[idx], pkt[idx + 1]]);
-    let rdlen = u16::from_be_bytes([pkt[idx + 8], pkt[idx + 9]]) as usize;
-    let rdata_start = idx + 10;
-    if rtype != 12 || rdata_start + rdlen > pkt.len() {
-        return None;
-    }
-    read_dns_name(pkt, rdata_start)
+    None
 }
 
 fn skip_dns_name(pkt: &[u8], mut idx: usize) -> Option<usize> {

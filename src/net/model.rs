@@ -137,43 +137,31 @@ impl PortState {
     }
 }
 
-/// Port filter tabs in the Host Inspector.
+/// Port filter tabs in the Device Inspector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PortFilter {
     #[default]
-    All,
-    InUse,
     Open,
+    InUse,
     Closed,
-    Filtered,
 }
 
 impl PortFilter {
-    pub const ALL: &'static [Self] = &[
-        Self::All,
-        Self::InUse,
-        Self::Open,
-        Self::Closed,
-        Self::Filtered,
-    ];
+    pub const ALL: &'static [Self] = &[Self::Open, Self::InUse, Self::Closed];
 
     pub const fn label(self) -> &'static str {
         match self {
-            Self::All => "All",
-            Self::InUse => "In Use",
             Self::Open => "Open",
+            Self::InUse => "In Use",
             Self::Closed => "Closed",
-            Self::Filtered => "Filtered",
         }
     }
 
     pub fn matches(self, state: PortState) -> bool {
         match self {
-            Self::All => true,
+            Self::Open => matches!(state, PortState::InUse | PortState::Open),
             Self::InUse => state == PortState::InUse,
-            Self::Open => state == PortState::Open,
-            Self::Closed => state == PortState::Closed,
-            Self::Filtered => state == PortState::Filtered,
+            Self::Closed => matches!(state, PortState::Closed | PortState::Filtered),
         }
     }
 }
@@ -322,20 +310,221 @@ pub struct Host {
     pub is_new: bool,
 }
 
+/// Sanitizes a discovered hostname by stripping local domain / DHCP noise and rejecting placeholders.
+pub fn clean_discovered_hostname(raw: &str) -> Option<String> {
+    let mut cleaned = raw.trim().trim_end_matches('.');
+    if cleaned.is_empty() {
+        return None;
+    }
+
+    let lower = cleaned.to_ascii_lowercase();
+    if lower.ends_with(".ts.net") {
+        if let Some((first, _)) = cleaned.split_once('.') {
+            cleaned = first;
+        }
+    } else {
+        for suffix in [
+            ".home.arpa",
+            ".localdomain",
+            ".local",
+            ".home",
+            ".lan",
+            ".internal",
+        ] {
+            if lower.ends_with(suffix) && cleaned.len() > suffix.len() {
+                cleaned = &cleaned[..cleaned.len() - suffix.len()];
+                break;
+            }
+        }
+    }
+
+    let mut had_repeated = false;
+    while cleaned.to_ascii_lowercase().ends_with("-home-home") && cleaned.len() > 10 {
+        had_repeated = true;
+        cleaned = &cleaned[..cleaned.len() - 5];
+    }
+    if had_repeated && cleaned.to_ascii_lowercase().ends_with("-home") && cleaned.len() > 5 {
+        cleaned = &cleaned[..cleaned.len() - 5];
+    }
+
+    cleaned = cleaned.trim().trim_end_matches('.');
+    if cleaned.is_empty() {
+        return None;
+    }
+
+    let check = cleaned.to_ascii_lowercase();
+    if matches!(
+        check.as_str(),
+        "none" | "unknown" | "localhost" | "_gateway" | "invalid"
+    ) {
+        return None;
+    }
+    if cleaned.parse::<Ipv4Addr>().is_ok() {
+        return None;
+    }
+    if is_hex_uuid(cleaned) {
+        return None;
+    }
+
+    Some(cleaned.to_string())
+}
+
+fn is_hex_uuid(s: &str) -> bool {
+    if s.len() != 36 {
+        return false;
+    }
+    let bytes = s.as_bytes();
+    for (idx, &b) in bytes.iter().enumerate() {
+        if matches!(idx, 8 | 13 | 18 | 23) {
+            if b != b'-' {
+                return false;
+            }
+        } else if !b.is_ascii_hexdigit() {
+            return false;
+        }
+    }
+    true
+}
+
+/// Condenses an IEEE/OUI organization name into a clean short brand label.
+pub fn short_vendor_name(vendor: &str) -> String {
+    let lower = vendor.to_ascii_lowercase();
+    for (needle, brand) in [
+        ("freebox", "Freebox"),
+        ("iliad", "Freebox"),
+        ("proxmox", "Proxmox"),
+        ("qemu", "QEMU"),
+        ("canon", "Canon"),
+        ("giga-byte", "Gigabyte"),
+        ("gigabyte", "Gigabyte"),
+        ("mercusys", "Mercusys"),
+        ("belkin", "Belkin"),
+        ("amazon", "Amazon"),
+        ("raspberry", "Raspberry Pi"),
+        ("espressif", "Espressif"),
+        ("apple", "Apple"),
+        ("tp-link", "TP-Link"),
+        ("ubiquiti", "Ubiquiti"),
+        ("synology", "Synology"),
+        ("tailscale", "Tailscale"),
+        ("vmware", "VMware"),
+        ("netgear", "Netgear"),
+        ("asus", "ASUS"),
+        ("google", "Google"),
+        ("intel", "Intel"),
+        ("realtek", "Realtek"),
+        ("samsung", "Samsung"),
+        ("xiaomi", "Xiaomi"),
+        ("docker", "Docker"),
+        ("rivet", "Killer LAN"),
+    ] {
+        if lower.contains(needle) {
+            return brand.to_string();
+        }
+    }
+
+    let first_part = vendor.split(['/', ',']).next().unwrap_or(vendor).trim();
+    let word = first_part.split_whitespace().next().unwrap_or(first_part);
+    let trimmed: String = word.chars().take(14).collect();
+    if trimmed.is_empty() {
+        "Device".to_string()
+    } else if trimmed
+        .chars()
+        .all(|c| !c.is_ascii_lowercase() && c.is_ascii_alphabetic())
+        && trimmed.len() > 3
+    {
+        let mut chars = trimmed.chars();
+        match chars.next() {
+            Some(first) => {
+                let mut out = first.to_ascii_uppercase().to_string();
+                out.push_str(&chars.as_str().to_ascii_lowercase());
+                out
+            }
+            None => trimmed,
+        }
+    } else {
+        trimmed
+    }
+}
+
 impl Host {
-    /// Display name prioritizing user nickname, resolved hostname, or IP string.
+    /// Display name prioritizing user nickname, cleaned hostname, then friendly role/vendor ID.
     pub fn display_name(&self) -> String {
         if let Some(nick) = &self.nickname {
-            if !nick.is_empty() {
-                return nick.clone();
+            let trimmed = nick.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
             }
         }
-        if let Some(name) = &self.hostname {
-            if !name.is_empty() {
-                return name.clone();
+        if let Some(name) = self.hostname.as_deref().and_then(clean_discovered_hostname) {
+            return name;
+        }
+        if self.role == DeviceRole::ThisMachine {
+            return "This PC".to_string();
+        }
+        if self.role == DeviceRole::Gateway {
+            if let Some(v) = &self.vendor {
+                if !self.is_randomized_mac && !v.trim().is_empty() {
+                    return format!("{} Gateway", short_vendor_name(v));
+                }
+            }
+            return "Gateway".to_string();
+        }
+        if self.is_randomized_mac {
+            return format!("Private Device (.{})", self.ip.octets()[3]);
+        }
+        if let Some(v) = &self.vendor {
+            if !v.trim().is_empty() {
+                let brand = short_vendor_name(v);
+                let has_printer_port = self.ports.iter().any(|p| {
+                    matches!(p.state, PortState::Open | PortState::InUse)
+                        && matches!(p.port, 631 | 9100)
+                });
+                if has_printer_port {
+                    return format!("{brand} Printer");
+                }
+                if brand.eq_ignore_ascii_case("Proxmox") {
+                    return "Proxmox Host".to_string();
+                }
+                return match self.role {
+                    DeviceRole::IoT => format!("{brand} IoT"),
+                    DeviceRole::Mobile => format!("{brand} Mobile"),
+                    DeviceRole::Container => format!("{brand} Container"),
+                    _ => format!("{brand} Device"),
+                };
             }
         }
-        self.ip.to_string()
+        format!("Device .{}", self.ip.octets()[3])
+    }
+
+    /// Concise summary of open / in-use ports (e.g. `22 ssh · 80 http +1`), or `"—"` if none.
+    pub fn open_ports_summary(&self, max_items: usize) -> String {
+        let mut active: Vec<&PortInfo> = self
+            .ports
+            .iter()
+            .filter(|p| matches!(p.state, PortState::InUse | PortState::Open))
+            .collect();
+        if active.is_empty() {
+            return "—".to_string();
+        }
+        active.sort_by(|a, b| a.state.cmp(&b.state).then_with(|| a.port.cmp(&b.port)));
+        let total = active.len();
+        let shown: Vec<String> = active
+            .into_iter()
+            .take(max_items.max(1))
+            .map(|p| {
+                if p.service == "tcp" {
+                    p.port.to_string()
+                } else {
+                    format!("{} {}", p.port, p.service)
+                }
+            })
+            .collect();
+        let mut out = shown.join(" · ");
+        if total > max_items.max(1) {
+            out.push_str(&format!(" +{}", total - max_items.max(1)));
+        }
+        out
     }
 
     /// Formatted MAC address (`AA:BB:CC:DD:EE:FF`) if known.
@@ -453,6 +642,7 @@ impl Host {
             } else {
                 let ip_s = self.ip.to_string();
                 let mac_s = self.mac_string().unwrap_or_default().to_ascii_lowercase();
+                let disp_s = self.display_name().to_ascii_lowercase();
                 let host_s = self.hostname.as_deref().unwrap_or("").to_ascii_lowercase();
                 let nick_s = self.nickname.as_deref().unwrap_or("").to_ascii_lowercase();
                 let vendor_s = self.vendor.as_deref().unwrap_or("").to_ascii_lowercase();
@@ -474,6 +664,7 @@ impl Host {
                 });
                 let hit = ip_s.contains(&lower)
                     || mac_s.contains(&lower)
+                    || disp_s.contains(&lower)
                     || host_s.contains(&lower)
                     || nick_s.contains(&lower)
                     || vendor_s.contains(&lower)
@@ -557,6 +748,7 @@ impl SocketState {
 pub struct LocalSocket {
     pub proto: String,
     pub local_addr: String,
+    pub local_ip_v4: Option<Ipv4Addr>,
     pub local_port: u16,
     pub remote_addr: String,
     pub remote_ip_v4: Option<Ipv4Addr>,
@@ -861,17 +1053,27 @@ pub fn parse_port_expr(expr: &str) -> Result<Vec<u16>, String> {
     Ok(set.into_iter().collect())
 }
 
-/// Quick top-32 port list.
+/// Quick top-37 port list.
 pub const QUICK_PORTS: &[u16] = &[
     21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 445, 548, 631, 993, 995, 1433, 1883,
-    2049, 3000, 3306, 3389, 5000, 5432, 5900, 6379, 8000, 8080, 8443, 9000, 27017,
+    2049, 3000, 3306, 3389, 5000, 5432, 5900, 6379, 8000, 8006, 8080, 8123, 8384, 8443, 8765, 9000,
+    27017, 32400,
 ];
 
 /// Web, API, DB, container, and media development port list.
 pub const WEB_DEV_PORTS: &[u16] = &[
     22, 53, 80, 81, 300, 443, 1883, 2375, 2376, 3000, 3001, 3306, 4000, 4200, 5000, 5173, 5432,
-    5672, 6379, 7000, 8000, 8006, 8008, 8080, 8081, 8096, 8443, 8888, 9000, 9090, 9200, 9443,
-    11434, 27017,
+    5672, 6379, 7000, 8000, 8006, 8008, 8080, 8081, 8096, 8123, 8384, 8443, 8765, 8888, 9000, 9090,
+    9200, 9443, 11434, 27017, 32400,
+];
+
+/// Extra registered service ports scanned in `Full` mode beyond 1..=1024.
+pub const EXTENDED_FULL_PORTS: &[u16] = &[
+    1080, 1194, 1433, 1521, 1883, 1900, 2049, 2222, 2375, 2376, 3000, 3001, 3128, 3306, 3389, 4000,
+    4200, 4443, 5000, 5001, 5173, 5353, 5355, 5357, 5432, 5555, 5601, 5672, 5900, 5901, 6379, 6443,
+    7000, 7443, 7878, 8000, 8006, 8008, 8080, 8081, 8090, 8096, 8112, 8123, 8200, 8384, 8443, 8500,
+    8765, 8880, 8883, 8888, 8989, 9000, 9001, 9090, 9091, 9100, 9200, 9418, 9443, 10000, 11211,
+    11434, 15672, 19999, 25565, 27015, 27017, 32400, 41641, 51413, 51820, 62078,
 ];
 
 /// Standard top-100 TCP ports.
@@ -891,14 +1093,14 @@ pub fn ports_for_preset(preset: ScanPreset, custom_expr: &str) -> Vec<u16> {
         ScanPreset::Standard => STANDARD_TOP_100_PORTS.to_vec(),
         ScanPreset::WebDev => WEB_DEV_PORTS.to_vec(),
         ScanPreset::Full => {
-            let mut set: BTreeSet<u16> = (1..=1000).collect();
+            let mut set: BTreeSet<u16> = (1..=1024).collect();
             for &p in WEB_DEV_PORTS {
                 set.insert(p);
             }
-            for &p in &[1433, 1521, 2049, 3389, 5900, 62078] {
+            for &p in EXTENDED_FULL_PORTS {
                 set.insert(p);
             }
-            set.into_iter().take(1024).collect()
+            set.into_iter().collect()
         }
         ScanPreset::Custom => parse_port_expr(custom_expr).unwrap_or_else(|_| QUICK_PORTS.to_vec()),
     }
@@ -910,7 +1112,7 @@ pub fn service_info(port: u16) -> (&'static str, &'static str) {
         21 => ("ftp", "File Transfer Protocol"),
         22 | 2222 => ("ssh", "Secure Shell remote login"),
         23 => ("telnet", "Unencrypted legacy terminal"),
-        25 | 587 => ("smtp", "Mail transfer server"),
+        25 | 465 | 587 => ("smtp", "Mail transfer server"),
         53 => ("dns", "Domain Name System resolver"),
         67 | 68 => ("dhcp", "Dynamic IP lease server"),
         80 | 81 | 8008 => ("http", "Unencrypted web server"),
@@ -918,6 +1120,7 @@ pub fn service_info(port: u16) -> (&'static str, &'static str) {
         111 => ("rpcbind", "ONC RPC portmapper"),
         123 => ("ntp", "Network Time synchronization"),
         135 => ("msrpc", "Windows RPC endpoint mapper"),
+        137 | 138 => ("netbios", "NetBIOS Name Service"),
         139 => ("netbios", "NetBIOS file/name session"),
         143 => ("imap", "Mail access server"),
         161 => ("snmp", "Network device telemetry"),
@@ -930,36 +1133,64 @@ pub fn service_info(port: u16) -> (&'static str, &'static str) {
         873 => ("rsync", "Remote file synchronization"),
         993 => ("imaps", "Encrypted IMAP mail"),
         995 => ("pop3s", "Encrypted POP3 mail"),
+        1080 => ("socks", "SOCKS network proxy"),
+        1194 => ("openvpn", "OpenVPN tunnel endpoint"),
         1433 => ("mssql", "Microsoft SQL Server"),
-        1883 => ("mqtt", "IoT telemetry message broker"),
+        1521 => ("oracle", "Oracle Database listener"),
+        1883 | 8883 => ("mqtt", "IoT telemetry message broker"),
         1900 => ("upnp", "UPnP / SSDP device discovery"),
         2049 => ("nfs", "Network File System share"),
         2375 | 2376 => ("docker", "Docker container engine API"),
-        3000 | 5173 => ("dev-web", "Frontend / Node dev server"),
+        3000 | 3001 | 4000 | 4200 | 5173 => ("dev-web", "Frontend / Node dev server"),
         3128 => ("proxy", "HTTP caching proxy"),
         3306 => ("mysql", "MySQL / MariaDB database"),
         3389 => ("rdp", "Windows Remote Desktop"),
-        5000 => ("upnp/api", "Local API / Synology DSM / Flask"),
+        4443 => ("https-alt", "Alternate HTTPS endpoint"),
+        5000 | 5001 => ("upnp/api", "Local API / Synology DSM / Flask"),
         5353 => ("mdns", "Multicast DNS (.local) discovery"),
+        5355 => ("llmnr", "LLMNR name resolution"),
         5357 => ("wsd", "Windows Web Services Discovery"),
         5432 => ("postgres", "PostgreSQL relational database"),
-        5672 => ("amqp", "RabbitMQ message queue"),
-        5900 => ("vnc", "Graphical remote screen sharing"),
+        5555 => ("adb", "Android Debug Bridge"),
+        5601 => ("kibana", "Kibana analytics dashboard"),
+        5672 | 15672 => ("amqp", "RabbitMQ message queue"),
+        5900 | 5901 => ("vnc", "Graphical remote screen sharing"),
         6379 => ("redis", "In-memory key-value datastore"),
-        8000 => ("http-alt", "Application / Python web server"),
+        6443 => ("k8s-api", "Kubernetes API server"),
+        7000 | 7443 => ("http-alt", "Application management service"),
+        7878 => ("radarr", "Radarr media manager"),
+        8000 | 8090 | 8880 => ("http-alt", "Application / Python web server"),
         8006 => ("proxmox", "Proxmox VE virtualization UI"),
         8080 | 8081 => ("http-proxy", "Web service or reverse proxy"),
         8096 => ("jellyfin", "Media streaming server"),
+        8112 => ("deluge", "Deluge web interface"),
+        8123 => ("home-assist", "Home Assistant automation hub"),
+        8200 => ("vault", "Vault / DLNA media server"),
+        8384 => ("syncthing", "Syncthing peer synchronization UI"),
         8443 | 9443 => ("https-alt", "Encrypted management web UI"),
+        8500 => ("consul", "HashiCorp Consul service UI"),
+        8765 => ("http-alt", "Web / HTTP file server"),
         8888 => ("notebook", "Jupyter / web control panel"),
-        9000 => ("portainer", "Admin web portal / PHP-FPM"),
+        8989 => ("sonarr", "Sonarr media manager"),
+        9000 | 9001 => ("portainer", "Admin web portal / PHP-FPM"),
         9090 => ("prometheus", "Metrics / Cockpit web console"),
+        9091 => ("transmission", "Transmission BitTorrent web UI"),
         9100 => ("jetdirect", "Raw network printer port"),
         9200 => ("elastic", "Elasticsearch HTTP API"),
+        9418 => ("git", "Git daemon protocol"),
+        10000 => ("webmin", "Webmin system admin UI"),
+        11211 => ("memcached", "In-memory object cache"),
         11434 => ("ollama", "Local inference API endpoint"),
+        19999 => ("netdata", "Netdata telemetry agent"),
+        25565 => ("minecraft", "Minecraft game server"),
+        27015 => ("source-ds", "Steam / Source dedicated server"),
         27017 => ("mongodb", "MongoDB document database"),
+        32400 => ("plex", "Plex Media Server"),
+        41641 => ("tailscale", "Tailscale WireGuard transport"),
+        51413 => ("torrent", "BitTorrent peer port"),
+        51820 => ("wireguard", "WireGuard VPN tunnel"),
         62078 => ("iphone-sync", "Apple mobile wireless sync"),
-        _ => ("unknown", "Listening TCP service"),
+        _ => ("tcp", ""),
     }
 }
 
