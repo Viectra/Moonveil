@@ -62,16 +62,20 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 fn render_export_bar(frame: &mut Frame, app: &mut App, area: Rect, pal: Palette) {
     let card = Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1));
     frame.render_widget(Block::default().style(pal.card_style()), card);
+    let lang = app.lang();
     let body = draw_card_header(
         frame,
         pal,
         card,
-        "Watch Monitor & Snapshot Exports",
+        lang.t(
+            "Watch Monitor & Snapshot Exports",
+            "Veille réseau & exports d'instantanés",
+        ),
         Some((
             if app.watch_mode {
-                "● Watching"
+                lang.t("● Watching", "● En veille")
             } else {
-                "- Idle"
+                lang.t("- Idle", "- Inactif")
             },
             if app.watch_mode {
                 pal.ok
@@ -92,9 +96,9 @@ fn render_export_bar(frame: &mut Frame, app: &mut App, area: Rect, pal: Palette)
         inner.y,
         inner.right(),
         if app.watch_mode {
-            " ■ Stop Watch "
+            lang.t(" ■ Stop Watch ", " ■ Arrêter la veille ")
         } else {
-            " ● Start Watch "
+            lang.t(" ● Start Watch ", " ● Démarrer la veille ")
         },
         app.watch_mode,
         pal,
@@ -112,7 +116,7 @@ fn render_export_bar(frame: &mut Frame, app: &mut App, area: Rect, pal: Palette)
             x,
             inner.y,
             inner.right(),
-            &format!(" ↓ Export {} ", fmt.label()),
+            &format!(" ↓ {} {} ", lang.t("Export", "Exporter"), fmt.label()),
             false,
             pal,
             ClickAction::ExportSnapshot(fmt),
@@ -125,7 +129,7 @@ fn render_export_bar(frame: &mut Frame, app: &mut App, area: Rect, pal: Palette)
         x,
         inner.y,
         inner.right(),
-        " Clear Feed ",
+        lang.t(" Clear Feed ", " Vider le fil "),
         false,
         pal,
         ClickAction::ClearTimeline,
@@ -135,20 +139,30 @@ fn render_export_bar(frame: &mut Frame, app: &mut App, area: Rect, pal: Palette)
 fn render_timeline(frame: &mut Frame, app: &mut App, area: Rect, pal: Palette) {
     let r = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
     frame.render_widget(Block::default().style(pal.card_style()), r);
+    let lang = app.lang();
     let body = draw_card_header(
         frame,
         pal,
         r,
-        "Network Change Timeline",
-        Some((&format!("{} events", app.timeline.len()), pal.veil_peach)),
+        lang.t(
+            "Network Change Timeline",
+            "Chronologie des changements réseau",
+        ),
+        Some((
+            &format!("{} {}", app.timeline.len(), lang.t("events", "événements")),
+            pal.veil_peach,
+        )),
     );
     let inner = inset_rect(body, 1, 0);
     app.hits.register_scroll(inner, ScrollTarget::Timeline);
 
     if app.timeline.is_empty() {
         frame.render_widget(
-            Paragraph::new("  No timeline events recorded yet. Enable Watch or run a scan.")
-                .style(Style::default().fg(pal.text_muted).bg(pal.surface)),
+            Paragraph::new(lang.t(
+                "  No timeline events recorded yet. Enable Watch or run a scan.",
+                "  Aucun événement enregistré. Activez la veille ou lancez un scan.",
+            ))
+            .style(Style::default().fg(pal.text_muted).bg(pal.surface)),
             inner,
         );
         return;
@@ -201,12 +215,23 @@ fn render_timeline(frame: &mut Frame, app: &mut App, area: Rect, pal: Palette) {
 
 fn render_saved_hosts(frame: &mut Frame, app: &mut App, area: Rect, pal: Palette) {
     frame.render_widget(Block::default().style(pal.card_style()), area);
+    let lang = app.lang();
     let body = draw_card_header(
         frame,
         pal,
         area,
-        "Saved & Trusted Devices",
-        Some((&format!("{} saved", app.known_hosts.hosts.len()), pal.ok)),
+        lang.t(
+            "Saved & Trusted Devices",
+            "Appareils enregistrés & de confiance",
+        ),
+        Some((
+            &format!(
+                "{} {}",
+                app.known_hosts.hosts.len(),
+                lang.t("saved", "enregistrés")
+            ),
+            pal.ok,
+        )),
     );
     let inner = inset_rect(body, 1, 0);
     app.hits.register_scroll(inner, ScrollTarget::SavedHosts);
@@ -214,7 +239,10 @@ fn render_saved_hosts(frame: &mut Frame, app: &mut App, area: Rect, pal: Palette
     let entries: Vec<_> = app.known_hosts.hosts.values().cloned().collect();
     if entries.is_empty() {
         frame.render_widget(
-            Paragraph::new("  Trust or rename any device in Hosts tab to save it for Wake-on-LAN.")
+            Paragraph::new(lang.t(
+                "  Trust or rename any device in Hosts tab to save it for Wake-on-LAN.",
+                "  Marquez de confiance ou renommez un appareil (onglet Hôtes) pour l'enregistrer pour le Wake-on-LAN.",
+            ))
                 .style(Style::default().fg(pal.text_muted).bg(pal.surface)),
             inner,
         );

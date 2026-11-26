@@ -5,7 +5,7 @@ use std::net::Ipv4Addr;
 use ratatui::layout::Rect;
 
 use crate::app::{SocketFilter, Tab};
-use crate::config::{AccentId, ThemeId};
+use crate::config::{AccentId, Language, ThemeId};
 use crate::net::model::{
     DeviceRole, ExportFormat, HostSortColumn, PortFilter, ScanMode, ScanPreset,
 };
@@ -55,6 +55,7 @@ pub enum ClickAction {
     ExportSnapshot(ExportFormat),
     ClearTimeline,
 
+    SetLanguage(Language),
     SetTheme(ThemeId),
     SetAccent(AccentId),
     ToggleAnimations,

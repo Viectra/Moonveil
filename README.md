@@ -60,6 +60,7 @@ mvl [OPTIONS]
 - `--watch` — Start with background Watch Mode enabled
 - `--theme <THEME>` — `moonveil`, `obsidian`, `abyss`, `graphite`, `terminal`
 - `--accent <COLOR>` — `violet`, `peach`, `cyan`, `mint`, `rose`, `amber`
+- `--lang <LANG>` — Interface language: `en` (English, default) or `fr` (Français)
 - `--no-splash` — Skip launch emblem animation
 - `--export <json|csv|md> <PATH>` — Run a one-shot scan and write a snapshot file directly
 

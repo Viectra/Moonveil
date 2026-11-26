@@ -67,16 +67,23 @@ fn compute_radar_prefix(app: &App) -> [u8; 3] {
 
 fn render_matrix(frame: &mut Frame, app: &mut App, area: Rect, prefix: [u8; 3], pal: Palette) {
     frame.render_widget(Block::default().style(pal.card_style()), area);
+    let lang = app.lang();
     let title = format!(
-        "Subnet Radar • {}.{}.{}.0/24",
-        prefix[0], prefix[1], prefix[2]
+        "{} • {}.{}.{}.0/24",
+        lang.t("Subnet Radar", "Radar sous-réseau"),
+        prefix[0],
+        prefix[1],
+        prefix[2]
     );
     let body = draw_card_header(
         frame,
         pal,
         area,
         &title,
-        Some(("Click any tile", pal.veil_peach)),
+        Some((
+            lang.t("Click any tile", "Cliquez sur une case"),
+            pal.veil_peach,
+        )),
     );
     let inner = inset_rect(body, 1, 0);
     if inner.height < 17 || inner.width < 52 {
@@ -115,18 +122,24 @@ fn render_matrix(frame: &mut Frame, app: &mut App, area: Rect, prefix: [u8; 3], 
             format!("{} ", DeviceRole::ThisMachine.icon()),
             Style::default().fg(pal.moon_violet),
         ),
-        Span::styled("Self  ", Style::default().fg(pal.text_dim)),
+        Span::styled(lang.t("Self  ", "Moi  "), Style::default().fg(pal.text_dim)),
         Span::styled(
             format!("{} ", DeviceRole::Gateway.icon()),
             Style::default().fg(pal.veil_peach),
         ),
-        Span::styled("GW  ", Style::default().fg(pal.text_dim)),
+        Span::styled(lang.t("GW  ", "Pass.  "), Style::default().fg(pal.text_dim)),
         Span::styled("● ", Style::default().fg(pal.ok)),
-        Span::styled("Trusted  ", Style::default().fg(pal.text_dim)),
+        Span::styled(
+            lang.t("Trusted  ", "Confiance  "),
+            Style::default().fg(pal.text_dim),
+        ),
         Span::styled("● ", Style::default().fg(pal.crit)),
-        Span::styled("New  ", Style::default().fg(pal.text_dim)),
+        Span::styled(
+            lang.t("New  ", "Nouveau  "),
+            Style::default().fg(pal.text_dim),
+        ),
         Span::styled("· ", Style::default().fg(pal.text_muted)),
-        Span::styled("Free", Style::default().fg(pal.text_muted)),
+        Span::styled(lang.t("Free", "Libre"), Style::default().fg(pal.text_muted)),
     ]);
     if lx < top.right() {
         frame.render_widget(
@@ -225,7 +238,14 @@ fn render_matrix(frame: &mut Frame, app: &mut App, area: Rect, prefix: [u8; 3], 
 fn render_tile_detail(frame: &mut Frame, app: &mut App, area: Rect, prefix: [u8; 3], pal: Palette) {
     frame.render_widget(Block::default().style(pal.card_style()), area);
     let ip = Ipv4Addr::new(prefix[0], prefix[1], prefix[2], app.radar_selected_octet);
-    let body = draw_card_header(frame, pal, area, &format!("Tile {ip}"), None);
+    let lang = app.lang();
+    let body = draw_card_header(
+        frame,
+        pal,
+        area,
+        &format!("{} {ip}", lang.t("Tile", "Case")),
+        None,
+    );
     let inner = inset_rect(body, 1, 0);
     if inner.height < 4 {
         return;
@@ -249,11 +269,19 @@ fn render_tile_detail(frame: &mut Frame, app: &mut App, area: Rect, prefix: [u8;
                 Style::default().fg(pal.text_dim),
             )),
             Line::from(Span::styled(
-                format!("Vendor: {}", host.vendor.as_deref().unwrap_or("—")),
+                format!(
+                    "{} {}",
+                    lang.t("Vendor:", "Fabricant :"),
+                    host.vendor.as_deref().unwrap_or("—")
+                ),
                 Style::default().fg(pal.veil_peach),
             )),
             Line::from(Span::styled(
-                format!("Ports: {iu} in-use • {op} open • {filt} filt • {cl} closed"),
+                if lang.is_fr() {
+                    format!("Ports : {iu} utilisés • {op} ouverts • {filt} filtrés • {cl} fermés")
+                } else {
+                    format!("Ports: {iu} in-use • {op} open • {filt} filt • {cl} closed")
+                },
                 Style::default().fg(pal.ok),
             )),
         ];
@@ -271,24 +299,33 @@ fn render_tile_detail(frame: &mut Frame, app: &mut App, area: Rect, prefix: [u8;
             inner.x,
             btn_y,
             inner.right(),
-            " Open in Hosts Inspector ",
+            lang.t(" Open in Hosts Inspector ", " Ouvrir dans l'inspecteur "),
             true,
             pal,
             ClickAction::JumpToHostIp(ip),
         );
     } else {
         let role_note = if app.radar_selected_octet == 0 {
-            "Network base address"
+            lang.t("Network base address", "Adresse de base du réseau")
         } else if app.radar_selected_octet == 255 {
-            "Subnet broadcast address"
+            lang.t(
+                "Subnet broadcast address",
+                "Adresse de diffusion du sous-réseau",
+            )
         } else {
-            "No live host detected on this IP yet."
+            lang.t(
+                "No live host detected on this IP yet.",
+                "Aucun hôte actif détecté sur cette IP pour l'instant.",
+            )
         };
         frame.render_widget(
             Paragraph::new(vec![
                 Line::from(Span::styled(role_note, Style::default().fg(pal.text_dim))),
                 Line::from(Span::styled(
-                    "Press 's' or Scan to probe.",
+                    lang.t(
+                        "Press 's' or Scan to probe.",
+                        "Appuyez sur 's' ou Scan pour sonder.",
+                    ),
                     Style::default().fg(pal.text_muted),
                 )),
             ])

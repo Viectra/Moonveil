@@ -51,7 +51,14 @@ fn render_interfaces_panel(frame: &mut Frame, app: &mut App, area: Rect, pal: Pa
         cols[0].height,
     );
     frame.render_widget(Block::default().style(pal.card_style()), left);
-    let body = draw_card_header(frame, pal, left, "Network Interfaces", None);
+    let lang = app.lang();
+    let body = draw_card_header(
+        frame,
+        pal,
+        left,
+        lang.t("Network Interfaces", "Interfaces réseau"),
+        None,
+    );
     let list_area = inset_rect(body, 1, 0);
     app.hits
         .register_scroll(list_area, ScrollTarget::Interfaces);
@@ -117,12 +124,16 @@ fn render_interfaces_panel(frame: &mut Frame, app: &mut App, area: Rect, pal: Pa
             let speed = iface
                 .speed_mbps
                 .map(|s| format!("{s} Mbps"))
-                .unwrap_or_else(|| "link".to_string());
+                .unwrap_or_else(|| lang.t("link", "lien").to_string());
             let rbody = draw_card_header(
                 frame,
                 pal,
                 cols[1],
-                &format!("{} Details", iface.name),
+                &if lang.is_fr() {
+                    format!("Détails {}", iface.name)
+                } else {
+                    format!("{} Details", iface.name)
+                },
                 Some((&speed, pal.moon_violet)),
             );
             let inner = inset_rect(rbody, 1, 0);
@@ -151,7 +162,10 @@ fn render_interfaces_panel(frame: &mut Frame, app: &mut App, area: Rect, pal: Pa
                                 .unwrap_or_else(|| "—".to_string()),
                             Style::default().fg(pal.veil_peach),
                         ),
-                        Span::styled("  GW: ", Style::default().fg(pal.text_muted)),
+                        Span::styled(
+                            lang.t("  GW: ", "  Passerelle : "),
+                            Style::default().fg(pal.text_muted),
+                        ),
                         Span::styled(gw, Style::default().fg(pal.text)),
                     ]),
                     Line::from(vec![
@@ -216,12 +230,20 @@ fn render_sockets_panel(frame: &mut Frame, app: &mut App, area: Rect, pal: Palet
         .iter()
         .filter(|s| s.state == SocketState::Listen)
         .count();
-    let badge = format!("{est_cnt} active • {lis_cnt} listening");
+    let lang = app.lang();
+    let badge = if lang.is_fr() {
+        format!("{est_cnt} actifs • {lis_cnt} en écoute")
+    } else {
+        format!("{est_cnt} active • {lis_cnt} listening")
+    };
     let body = draw_card_header(
         frame,
         pal,
         top_padded,
-        "Local Open & In-Use Sockets",
+        lang.t(
+            "Local Open & In-Use Sockets",
+            "Sockets locaux ouverts & utilisés",
+        ),
         Some((&badge, pal.in_use)),
     );
     let inner = inset_rect(body, 1, 0);
@@ -239,7 +261,7 @@ fn render_sockets_panel(frame: &mut Frame, app: &mut App, area: Rect, pal: Palet
             x,
             f_row.y,
             f_row.right(),
-            &format!(" {} ", sf.label()),
+            &format!(" {} ", sf.label_for(lang)),
             app.socket_filter == sf,
             pal,
             ClickAction::SetSocketFilter(sf),
@@ -255,7 +277,11 @@ fn render_sockets_panel(frame: &mut Frame, app: &mut App, area: Rect, pal: Palet
             pal.recessed
         };
         let txt = if app.socket_search.is_empty() && !app.socket_search_focused {
-            " Filter process, port, or peer IP…".to_string()
+            lang.t(
+                " Filter process, port, or peer IP…",
+                " Filtrer processus, port ou IP distante…",
+            )
+            .to_string()
         } else {
             format!(" {}", app.socket_search)
         };
