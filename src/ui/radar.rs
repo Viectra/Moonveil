@@ -1,297 +1,322 @@
-//! Subnet Radar tab: interactive 16x16 clickable /24 IP matrix (.0..255) & topology breakdown.
+//! Subnet Radar tab: clickable 16x16 IPv4 matrix (.0–.255), /24 pager, and selected host summary.
 
+use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph, Wrap};
+use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 
+use unicode_width::UnicodeWidthStr;
+
 use crate::app::App;
+use crate::config::Language;
 use crate::net::linux::network_addr;
-use crate::net::model::{format_mac, DeviceRole, Host};
-use crate::ui::hit::{ClickAction, HitRegistry};
-use crate::ui::hosts::push_pill;
+use crate::net::model::DeviceRole;
+use crate::ui::hit::ClickAction;
 use crate::ui::theme::{draw_card_header, inset_rect, truncate_str, Palette};
-use crate::ui::widgets::mix;
 
-pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
-    let pal = app.palette;
-    if area.width < 40 || area.height < 14 {
-        return;
-    }
-
-    let base_prefix = compute_radar_prefix(app);
-    let cols = if area.width >= 100 {
+/// Renders the interactive `16×16` Subnet Radar matrix and selected-tile inspector.
+pub fn render(frame: &mut Frame, app: &mut App, area: Rect, pal: Palette) {
+    let cols = if area.width >= 96 {
         Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(54), Constraint::Length(38)])
+            .constraints([Constraint::Min(54), Constraint::Length(36)])
             .split(area)
     } else {
         Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(19), Constraint::Length(8)])
+            .constraints([Constraint::Min(18), Constraint::Length(12)])
             .split(area)
     };
 
-    render_matrix(frame, app, cols[0], base_prefix, pal);
-    let side = if area.width >= 100 {
-        Rect::new(
-            cols[1].x + 1,
-            cols[1].y,
-            cols[1].width.saturating_sub(1),
-            cols[1].height,
-        )
-    } else {
-        cols[1]
-    };
-    render_tile_detail(frame, app, side, base_prefix, pal);
+    render_matrix_card(frame, app, cols[0], pal);
+    render_tile_detail_card(frame, app, cols[1], pal);
 }
 
-fn compute_radar_prefix(app: &App) -> [u8; 3] {
-    if let Some(iface) = app.active_interface() {
-        if let Some(ip) = iface.ipv4 {
-            let base = if iface.prefix_len <= 23 && app.radar_page_offset > 0 {
-                let net = u32::from(network_addr(ip, iface.prefix_len)) & 0xFFFF_FF00;
-                net.saturating_add(app.radar_page_offset << 8)
-            } else {
-                u32::from(ip) & 0xFFFF_FF00
-            };
-            let b = Ipv4Addr::from(base).octets();
-            return [b[0], b[1], b[2]];
-        }
-    }
-    [192, 168, 1]
-}
-
-fn render_matrix(frame: &mut Frame, app: &mut App, area: Rect, prefix: [u8; 3], pal: Palette) {
+fn render_matrix_card(frame: &mut Frame, app: &mut App, area: Rect, pal: Palette) {
     frame.render_widget(Block::default().style(pal.card_style()), area);
-    let title = format!(
-        "Subnet Radar • {}.{}.{}.0/24",
-        prefix[0], prefix[1], prefix[2]
-    );
-    let body = draw_card_header(
-        frame,
-        pal,
-        area,
-        &title,
-        Some(("Click any tile", pal.veil_peach)),
-    );
-    let inner = inset_rect(body, 1, 0);
-    if inner.height < 17 || inner.width < 52 {
+    let inner = inset_rect(area, 1, 1);
+    if inner.width < 20 || inner.height < 10 {
         return;
     }
 
-    // Legend & /16 page controls on top row
-    let top = Rect::new(inner.x, inner.y, inner.width, 1);
-    let mut lx = top.x;
-    lx = push_pill(
-        frame,
-        app,
-        lx,
-        top.y,
-        top.right(),
-        " ◀ /24 ",
-        false,
-        pal,
-        ClickAction::RadarPageDelta(-1),
-    );
-    lx += 1;
-    lx = push_pill(
-        frame,
-        app,
-        lx,
-        top.y,
-        top.right(),
-        " /24 ▶ ",
-        false,
-        pal,
-        ClickAction::RadarPageDelta(1),
-    );
-    lx += 2;
-    let legend = Line::from(vec![
-        Span::styled(
-            format!("{} ", DeviceRole::ThisMachine.icon()),
-            Style::default().fg(pal.moon_violet),
+    let lang = app.lang();
+    let iface = app.active_interface().cloned();
+    let (cidr, page_count, slice_prefix, slice_octets_base) = match &iface {
+        Some(i) => {
+            let pages = i.slash24_page_count().max(1);
+            let page = app.radar_page_offset % pages;
+            let base = u32::from(network_addr(i.ip, i.prefix_len)) + page * 256;
+            let base_ip = Ipv4Addr::from(base);
+            let o = base_ip.octets();
+            (
+                i.cidr.clone(),
+                pages,
+                format!("{}.{}.{}.0/24", o[0], o[1], o[2]),
+                base,
+            )
+        }
+        None => (
+            "—".to_string(),
+            1,
+            "192.168.1.0/24".to_string(),
+            0xC0A8_0100,
         ),
-        Span::styled("Self  ", Style::default().fg(pal.text_dim)),
-        Span::styled(
-            format!("{} ", DeviceRole::Gateway.icon()),
-            Style::default().fg(pal.veil_peach),
-        ),
-        Span::styled("GW  ", Style::default().fg(pal.text_dim)),
-        Span::styled("● ", Style::default().fg(pal.ok)),
-        Span::styled("Online  ", Style::default().fg(pal.text_dim)),
-        Span::styled("· ", Style::default().fg(pal.text_muted)),
-        Span::styled("Free", Style::default().fg(pal.text_muted)),
-    ]);
-    if lx < top.right() {
-        frame.render_widget(
-            Paragraph::new(legend).style(Style::default().bg(pal.surface)),
-            Rect::new(lx, top.y, top.right() - lx, 1),
-        );
-    }
-
-    let host_map: std::collections::HashMap<Ipv4Addr, &Host> =
-        app.snapshot.hosts.iter().map(|h| (h.ip, h)).collect();
-    let sweep_octet = if app.scan_progress.active {
-        Some((app.tick_count % 256) as u8)
-    } else {
-        None
     };
 
-    let cell_w = ((inner.width.saturating_sub(4)) / 16).clamp(3, 5);
-    let grid_y0 = inner.y + 2;
+    let title = match lang {
+        Language::En => format!("Subnet Radar ({slice_prefix})"),
+        Language::Fr => format!("Radar réseau ({slice_prefix})"),
+    };
+    let badge = if page_count > 1 {
+        format!(
+            "{cidr} [{}/{}]",
+            (app.radar_page_offset % page_count) + 1,
+            page_count
+        )
+    } else {
+        cidr
+    };
+    let mut body = draw_card_header(frame, pal, inner, &title, Some((&badge, pal.veil_peach)));
 
-    for row in 0..16_u8 {
-        let y = grid_y0 + u16::from(row);
-        if y >= inner.bottom() {
-            break;
-        }
-        // Row header (.00, .16, ...)
-        let rh = format!("{:02X}:", row * 16);
+    if page_count > 1 && body.height >= 2 {
+        let ctrl_row = Rect::new(body.x, body.y, body.width, 1);
+        let prev_s = lang.t(" ◀ Prev /24 ", " ◀ Préc /24 ");
+        let next_s = lang.t(" Next /24 ▶ ", " Suiv /24 ▶ ");
+        let prev_rect = Rect::new(ctrl_row.x, ctrl_row.y, prev_s.width() as u16, 1);
+        let next_rect = Rect::new(
+            ctrl_row.x + prev_s.width() as u16 + 2,
+            ctrl_row.y,
+            next_s.width() as u16,
+            1,
+        );
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                rh,
+                prev_s,
+                pal.pill_style(false, app.hits.is_hovered(prev_rect)),
+            ))),
+            prev_rect,
+        );
+        app.hits.record(prev_rect, ClickAction::RadarPageDelta(-1));
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                next_s,
+                pal.pill_style(false, app.hits.is_hovered(next_rect)),
+            ))),
+            next_rect,
+        );
+        app.hits.record(next_rect, ClickAction::RadarPageDelta(1));
+        body.y += 1;
+        body.height = body.height.saturating_sub(1);
+    }
+
+    let mut host_by_oct = HashMap::new();
+    for h in &app.snapshot.hosts {
+        let u = u32::from(h.ip);
+        if u >= slice_octets_base && u < slice_octets_base + 256 {
+            host_by_oct.insert((u - slice_octets_base) as u8, h);
+        }
+    }
+
+    let col_w = ((usize::from(body.width.saturating_sub(5))) / 16).clamp(3, 5) as u16;
+    for row_idx in 0..16_u16 {
+        let py = body.y + row_idx;
+        if py >= body.bottom().saturating_sub(2) {
+            break;
+        }
+        let row_label = format!(".{:02X} ", row_idx * 16);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                row_label,
                 Style::default().fg(pal.text_muted).bg(pal.surface),
             ))),
-            Rect::new(inner.x, y, 3, 1),
+            Rect::new(body.x, py, 4, 1),
         );
 
-        for col in 0..16_u8 {
-            let octet = row * 16 + col;
-            let ip = Ipv4Addr::new(prefix[0], prefix[1], prefix[2], octet);
-            let tile_rect = Rect::new(inner.x + 4 + u16::from(col) * cell_w, y, cell_w, 1);
-            if tile_rect.right() > inner.right() {
+        for col_idx in 0..16_u16 {
+            let oct = (row_idx * 16 + col_idx) as u8;
+            let px = body.x + 4 + col_idx * col_w;
+            if px + col_w > body.right() {
                 break;
             }
-            let hovered = HitRegistry::is_hovered(tile_rect, app.hover);
-            let selected = app.radar_selected_octet == octet;
-            let host = host_map.get(&ip).copied();
-            let is_sweep = sweep_octet == Some(octet);
+            let tile_rect = Rect::new(px, py, col_w, 1);
+            let is_selected = app.radar_selected_octet == oct;
+            let host_opt = host_by_oct.get(&oct).copied();
 
-            let (fg, mut bg, glyph) = if octet == 0 || octet == 255 {
-                (pal.text_muted, pal.recessed, "·")
-            } else if let Some(h) = host {
-                let c = match h.role {
-                    DeviceRole::ThisMachine => pal.moon_violet,
-                    DeviceRole::Gateway => pal.veil_peach,
-                    _ if !h.online => pal.text_muted,
-                    _ => pal.ok,
-                };
-                (c, pal.surface_alt, h.role.icon())
-            } else {
-                (pal.text_muted, pal.surface, "·")
+            let (fg, bg, sym) = match host_opt {
+                Some(h) if h.role == DeviceRole::ThisMachine => {
+                    (pal.bg, pal.veil_peach, format!("{oct:>2}✦"))
+                }
+                Some(h) if h.role == DeviceRole::Gateway => {
+                    (pal.bg, pal.moon_violet, format!("{oct:>2}◈"))
+                }
+                Some(h) if h.online => (pal.ok, pal.selection, format!("{oct:>2}●")),
+                Some(_) => (pal.warn, pal.surface_alt, format!("{oct:>2}○")),
+                None => (pal.text_muted, pal.surface, format!("{oct:>2}·")),
             };
 
-            if is_sweep {
-                bg = mix(bg, pal.moon_violet, 0.55);
-            } else if selected {
-                bg = pal.selection;
-            } else if hovered {
-                bg = pal.hover;
-            }
-
-            let label = if cell_w >= 4 {
-                format!("{glyph}{octet:02X}")
+            let style = if is_selected {
+                Style::default()
+                    .fg(pal.accent_fg)
+                    .bg(pal.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else if app.hits.is_hovered(tile_rect) {
+                Style::default().fg(pal.text).bg(pal.hover)
             } else {
-                format!("{glyph}{octet:1X}")
+                Style::default().fg(fg).bg(bg)
             };
+
+            let cell_str = if col_w >= 4 { format!(" {sym}") } else { sym };
             frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    truncate_str(&label, usize::from(cell_w)),
-                    Style::default()
-                        .fg(fg)
-                        .bg(bg)
-                        .add_modifier(if host.is_some() {
-                            Modifier::BOLD
-                        } else {
-                            Modifier::empty()
-                        }),
-                )))
-                .style(Style::default().bg(bg)),
+                Paragraph::new(Line::from(Span::styled(cell_str, style))),
                 tile_rect,
             );
             app.hits
-                .register(tile_rect, ClickAction::SelectRadarOctet(octet));
+                .record(tile_rect, ClickAction::SelectRadarOctet(oct));
         }
     }
+
+    let legend_y = body.bottom().saturating_sub(1);
+    let legend = Line::from(vec![
+        Span::styled("✦ ", Style::default().fg(pal.veil_peach).bg(pal.surface)),
+        Span::styled(
+            lang.t("This PC   ", "Ce PC   "),
+            Style::default().fg(pal.text_dim).bg(pal.surface),
+        ),
+        Span::styled("◈ ", Style::default().fg(pal.moon_violet).bg(pal.surface)),
+        Span::styled(
+            lang.t("Gateway   ", "Passerelle   "),
+            Style::default().fg(pal.text_dim).bg(pal.surface),
+        ),
+        Span::styled("● ", Style::default().fg(pal.ok).bg(pal.surface)),
+        Span::styled(
+            lang.t("Online   ", "En ligne   "),
+            Style::default().fg(pal.text_dim).bg(pal.surface),
+        ),
+        Span::styled("· ", Style::default().fg(pal.text_muted).bg(pal.surface)),
+        Span::styled(
+            lang.t("Free / Unseen", "Libre"),
+            Style::default().fg(pal.text_muted).bg(pal.surface),
+        ),
+    ]);
+    frame.render_widget(
+        Paragraph::new(legend),
+        Rect::new(body.x, legend_y, body.width, 1),
+    );
 }
 
-fn render_tile_detail(frame: &mut Frame, app: &mut App, area: Rect, prefix: [u8; 3], pal: Palette) {
+fn render_tile_detail_card(frame: &mut Frame, app: &mut App, area: Rect, pal: Palette) {
     frame.render_widget(Block::default().style(pal.card_style()), area);
-    let ip = Ipv4Addr::new(prefix[0], prefix[1], prefix[2], app.radar_selected_octet);
-    let body = draw_card_header(frame, pal, area, &format!("Tile {ip}"), None);
-    let inner = inset_rect(body, 1, 0);
-    if inner.height < 4 {
+    let inner = inset_rect(area, 1, 1);
+    if inner.width < 14 || inner.height < 6 {
         return;
     }
 
-    if let Some(host) = app.snapshot.hosts.iter().find(|h| h.ip == ip).cloned() {
-        let (iu, op, filt, cl) = host.port_counts();
+    let lang = app.lang();
+    let base = app
+        .active_interface()
+        .map(|i| {
+            let pages = i.slash24_page_count().max(1);
+            let page = app.radar_page_offset % pages;
+            u32::from(network_addr(i.ip, i.prefix_len)) + page * 256
+        })
+        .unwrap_or(0xC0A8_0100);
+    let tile_ip = Ipv4Addr::from((base & 0xFFFFFF00) + u32::from(app.radar_selected_octet));
+
+    let body = draw_card_header(
+        frame,
+        pal,
+        inner,
+        &tile_ip.to_string(),
+        Some((lang.t("Tile", "Tuile"), pal.moon_violet)),
+    );
+
+    if let Some(host) = app.snapshot.hosts.iter().find(|h| h.ip == tile_ip).cloned() {
+        let name = host.display_name_for(lang);
+        let (iu, op, _, _) = host.port_counts();
+        let vendor = host
+            .short_vendor_name()
+            .unwrap_or_else(|| host.vendor.clone().unwrap_or_else(|| "—".to_string()));
         let lines = vec![
-            Line::from(vec![
-                Span::styled(host.role.icon(), Style::default().fg(pal.moon_violet)),
-                Span::styled(
-                    format!(" {}", host.display_name()),
-                    Style::default().fg(pal.text).add_modifier(Modifier::BOLD),
-                ),
-            ]),
+            Line::from(Span::styled(
+                truncate_str(&name, usize::from(body.width)),
+                Style::default()
+                    .fg(pal.veil_peach)
+                    .bg(pal.surface)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                format!("{}: {}", lang.t("Role", "Rôle"), host.role.label_for(lang)),
+                Style::default().fg(pal.text_dim).bg(pal.surface),
+            )),
             Line::from(Span::styled(
                 format!(
-                    "MAC: {}",
-                    host.mac.map(format_mac).unwrap_or_else(|| "—".into())
+                    "{}: {}",
+                    lang.t("Vendor", "Fabricant"),
+                    truncate_str(&vendor, usize::from(body.width.saturating_sub(11)))
                 ),
-                Style::default().fg(pal.text_dim),
+                Style::default().fg(pal.text_dim).bg(pal.surface),
             )),
             Line::from(Span::styled(
-                format!("Vendor: {}", host.vendor.as_deref().unwrap_or("—")),
-                Style::default().fg(pal.veil_peach),
+                format!("MAC: {}", host.mac_string()),
+                Style::default().fg(pal.text_dim).bg(pal.surface),
             )),
             Line::from(Span::styled(
-                format!("Ports: {iu} in-use • {op} open • {filt} filt • {cl} closed"),
-                Style::default().fg(pal.ok),
+                format!(
+                    "{}: {} ({} {})",
+                    lang.t("Ports", "Ports"),
+                    iu + op,
+                    iu,
+                    lang.t("active", "actifs")
+                ),
+                Style::default().fg(pal.text).bg(pal.surface),
             )),
         ];
-        let detail_h = inner.height.saturating_sub(2);
+        frame.render_widget(Paragraph::new(lines), body);
+
+        let btn_lbl = lang.t(" Inspect Host → ", " Inspecter l'hôte → ");
+        let btn_rect = Rect::new(
+            body.x,
+            body.bottom().saturating_sub(1),
+            (btn_lbl.width() as u16).min(body.width),
+            1,
+        );
         frame.render_widget(
-            Paragraph::new(lines)
-                .style(Style::default().bg(pal.surface))
-                .wrap(Wrap { trim: true }),
-            Rect::new(inner.x, inner.y, inner.width, detail_h),
+            Paragraph::new(Line::from(Span::styled(
+                btn_lbl,
+                Style::default()
+                    .fg(pal.accent_fg)
+                    .bg(pal.accent)
+                    .add_modifier(Modifier::BOLD),
+            ))),
+            btn_rect,
         );
-        let btn_y = inner.bottom().saturating_sub(1);
-        let _ = push_pill(
-            frame,
-            app,
-            inner.x,
-            btn_y,
-            inner.right(),
-            " Inspect Device ",
-            true,
-            pal,
-            ClickAction::JumpToHostIp(ip),
-        );
+        app.hits
+            .record(btn_rect, ClickAction::JumpToHostIp(tile_ip));
     } else {
-        let role_note = if app.radar_selected_octet == 0 {
-            "Network base address"
-        } else if app.radar_selected_octet == 255 {
-            "Subnet broadcast address"
-        } else {
-            "No live host detected on this IP yet."
-        };
-        frame.render_widget(
-            Paragraph::new(vec![
-                Line::from(Span::styled(role_note, Style::default().fg(pal.text_dim))),
-                Line::from(Span::styled(
-                    "Press 's' or Scan to probe.",
-                    Style::default().fg(pal.text_muted),
-                )),
-            ])
-            .style(Style::default().bg(pal.surface))
-            .wrap(Wrap { trim: true }),
-            inner,
-        );
+        let lines = vec![
+            Line::from(Span::styled(
+                lang.t(
+                    "No host observed at this address.",
+                    "Aucun hôte détecté à cette adresse.",
+                ),
+                Style::default().fg(pal.text_muted).bg(pal.surface),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                format!(
+                    "{}: {}/{} {}",
+                    lang.t("Active subnet hosts", "Hôtes actifs"),
+                    app.snapshot.hosts.iter().filter(|h| h.online).count(),
+                    app.snapshot.hosts.len(),
+                    lang.t("total", "total")
+                ),
+                Style::default().fg(pal.text_dim).bg(pal.surface),
+            )),
+        ];
+        frame.render_widget(Paragraph::new(lines), body);
     }
 }
