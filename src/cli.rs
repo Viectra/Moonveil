@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 
 use crate::app::App;
 use crate::config::{AccentId, Config, ThemeId};
-use crate::net::model::{ExportFormat, ScanMode};
+use crate::net::model::{parse_port_expr, ExportFormat, ScanMode, ScanPreset};
 use crate::net::scanner::{run_scan, EngineEvent, ScanConfig};
 use crate::net::tools::export_snapshot;
 use crate::ui;
@@ -29,8 +29,11 @@ static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 struct CliOptions {
     demo_mode: bool,
     no_splash: bool,
+    watch: bool,
     iface: Option<String>,
     mode: Option<ScanMode>,
+    preset: Option<ScanPreset>,
+    custom_ports: Option<String>,
     theme: Option<ThemeId>,
     accent: Option<AccentId>,
     export_job: Option<(ExportFormat, PathBuf)>,
@@ -45,8 +48,11 @@ fn parse_cli() -> Result<CliParseOutcome, String> {
     let mut opts = CliOptions {
         demo_mode: false,
         no_splash: false,
+        watch: false,
         iface: None,
         mode: None,
+        preset: None,
+        custom_ports: None,
         theme: None,
         accent: None,
         export_job: None,
@@ -65,13 +71,39 @@ fn parse_cli() -> Result<CliParseOutcome, String> {
             }
             "--demo" => opts.demo_mode = true,
             "--no-splash" => opts.no_splash = true,
+            "--watch" => opts.watch = true,
             "--advanced" => opts.mode = Some(ScanMode::Advanced),
             "--normal" => opts.mode = Some(ScanMode::Normal),
-            "--iface" => {
+            "-i" | "--iface" | "--interface" => {
                 let v = args
                     .next()
                     .ok_or_else(|| "Missing interface name after --iface".to_string())?;
                 opts.iface = Some(v);
+            }
+            "--preset" => {
+                let v = args
+                    .next()
+                    .ok_or_else(|| "Missing preset after --preset".to_string())?;
+                opts.preset = Some(match v.trim().to_ascii_lowercase().as_str() {
+                    "quick" => ScanPreset::Quick,
+                    "standard" | "top100" => ScanPreset::Standard,
+                    "full" | "top1000" => ScanPreset::Full,
+                    "web" | "webdev" => ScanPreset::WebDev,
+                    "custom" => ScanPreset::Custom,
+                    _ => {
+                        return Err(format!(
+                            "Unknown preset '{v}' (quick, standard, full, webdev, custom)"
+                        ));
+                    }
+                });
+            }
+            "--ports" => {
+                let v = args
+                    .next()
+                    .ok_or_else(|| "Missing port expression after --ports".to_string())?;
+                parse_port_expr(&v)?;
+                opts.preset = Some(ScanPreset::Custom);
+                opts.custom_ports = Some(v);
             }
             "--theme" => {
                 let v = args
@@ -125,8 +157,11 @@ USAGE:
 
 OPTIONS:
     --demo                        Run with realistic simulated LAN & Docker telemetry
-    --iface <NAME>                Select initial network interface (e.g. enp6s18, wlan0)
+    -i, --iface <NAME>            Select initial network interface (e.g. enp6s18, wlan0)
     --normal / --advanced         Start in Normal Mode or Advanced Mode
+    --preset <PRESET>             quick | standard | full | webdev | custom
+    --ports <EXPR>                Custom ports (e.g. 22,80,443,8000-8090)
+    --watch                       Enable background Watch Mode on startup
     --theme <THEME>               moonveil | obsidian | abyss | graphite | terminal
     --accent <COLOR>              violet | peach | cyan | mint | rose | amber
     --no-splash                   Skip the animated launch logo reveal
@@ -201,6 +236,12 @@ pub async fn run_cli() {
     let mut cfg = Config::load();
     if let Some(m) = opts.mode {
         cfg.mode = m;
+    }
+    if let Some(p) = opts.preset {
+        cfg.default_preset = p;
+    }
+    if let Some(ports) = opts.custom_ports {
+        cfg.custom_ports = ports;
     }
     if let Some(t) = opts.theme {
         cfg.theme = t;
@@ -281,6 +322,7 @@ pub async fn run_cli() {
     };
 
     let mut app = App::new(cfg, opts.demo_mode, opts.iface.as_deref());
+    app.watch_mode = opts.watch;
     app.start_scan(None);
 
     let tick_interval = Duration::from_millis(80);

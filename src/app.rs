@@ -165,6 +165,7 @@ pub struct App {
     pub hover: Option<(u16, u16)>,
     pub last_click: Option<(Ipv4Addr, Instant)>,
     pub hits: HitRegistry,
+    pub persist_state: bool,
     pub should_quit: bool,
     pub engine_tx: mpsc::UnboundedSender<EngineEvent>,
     pub engine_rx: mpsc::UnboundedReceiver<EngineEvent>,
@@ -278,6 +279,7 @@ impl App {
             hover: None,
             last_click: None,
             hits: HitRegistry::default(),
+            persist_state: true,
             should_quit: false,
             engine_tx,
             engine_rx,
@@ -294,6 +296,18 @@ impl App {
     pub fn is_splash_active(&self) -> bool {
         self.splash_until
             .is_some_and(|until| Instant::now() < until)
+    }
+
+    fn save_config(&self) {
+        if self.persist_state {
+            self.save_config();
+        }
+    }
+
+    fn save_known_hosts(&self) {
+        if self.persist_state {
+            self.save_known_hosts();
+        }
     }
 
     pub fn pulse_phase(&self) -> f64 {
@@ -579,7 +593,7 @@ impl App {
         if let Some((mac_s, ip, nick, trusted, vend, host)) = saved_record {
             self.known_hosts
                 .upsert(&mac_s, ip, nick, trusted, vend, host);
-            let _ = self.known_hosts.save();
+            self.save_known_hosts();
         }
     }
 
@@ -857,7 +871,7 @@ impl App {
                             Ok(ports) => {
                                 self.config.custom_ports = expr;
                                 self.config.default_preset = ScanPreset::Custom;
-                                let _ = self.config.save();
+                                self.save_config();
                                 self.modal = Modal::None;
                                 self.set_toast(format!(
                                     "Custom preset set ({} ports)",
@@ -1048,7 +1062,7 @@ impl App {
             }
             ClickAction::ToggleMode => {
                 self.config.mode = self.config.mode.toggle();
-                let _ = self.config.save();
+                self.save_config();
                 self.set_toast(format!(
                     "Switched to {} Mode ({})",
                     self.config.mode.label(),
@@ -1057,7 +1071,7 @@ impl App {
             }
             ClickAction::SetMode(mode) => {
                 self.config.mode = mode;
-                let _ = self.config.save();
+                self.save_config();
             }
             ClickAction::CycleInterface => {
                 let vis = self.visible_interfaces();
@@ -1089,12 +1103,12 @@ impl App {
             }
             ClickAction::CyclePreset => {
                 self.config.default_preset = self.config.default_preset.next();
-                let _ = self.config.save();
+                self.save_config();
                 self.set_toast(format!("Preset: {}", self.config.default_preset.label()));
             }
             ClickAction::SetPreset(p) => {
                 self.config.default_preset = p;
-                let _ = self.config.save();
+                self.save_config();
             }
             ClickAction::ToggleWatch => {
                 self.watch_mode = !self.watch_mode;
@@ -1203,28 +1217,28 @@ impl App {
             ClickAction::SetTheme(t) => {
                 self.config.theme = t;
                 self.palette = Palette::from_config(self.config.theme, self.config.accent);
-                let _ = self.config.save();
+                self.save_config();
             }
             ClickAction::SetAccent(a) => {
                 self.config.accent = a;
                 self.palette = Palette::from_config(self.config.theme, self.config.accent);
-                let _ = self.config.save();
+                self.save_config();
             }
             ClickAction::ToggleAnimations => {
                 self.config.animations = !self.config.animations;
-                let _ = self.config.save();
+                self.save_config();
             }
             ClickAction::ToggleSplash => {
                 self.config.splash = !self.config.splash;
-                let _ = self.config.save();
+                self.save_config();
             }
             ClickAction::ToggleVirtualIfaces => {
                 self.config.show_virtual_ifaces = !self.config.show_virtual_ifaces;
-                let _ = self.config.save();
+                self.save_config();
             }
             ClickAction::ToggleGrabBanners => {
                 self.config.grab_banners = !self.config.grab_banners;
-                let _ = self.config.save();
+                self.save_config();
             }
             ClickAction::CycleConcurrency => {
                 self.config.concurrency = match self.config.concurrency {
@@ -1233,7 +1247,7 @@ impl App {
                     256 => 512,
                     _ => 64,
                 };
-                let _ = self.config.save();
+                self.save_config();
             }
             ClickAction::CycleTimeout => {
                 self.config.timeout_ms = match self.config.timeout_ms {
@@ -1242,7 +1256,7 @@ impl App {
                     500 => 1000,
                     _ => 150,
                 };
-                let _ = self.config.save();
+                self.save_config();
             }
             ClickAction::CycleWatchInterval => {
                 self.config.watch_interval_secs = match self.config.watch_interval_secs {
@@ -1251,7 +1265,7 @@ impl App {
                     30 => 60,
                     _ => 10,
                 };
-                let _ = self.config.save();
+                self.save_config();
             }
             ClickAction::OpenCustomPortsModal => {
                 self.modal = Modal::CustomPorts {
@@ -1262,7 +1276,7 @@ impl App {
             ClickAction::ResetDefaults => {
                 self.config = Config::default();
                 self.palette = Palette::from_config(self.config.theme, self.config.accent);
-                let _ = self.config.save();
+                self.save_config();
                 self.set_toast("Reset preferences to Moonveil defaults.");
             }
         }
@@ -1298,7 +1312,7 @@ impl App {
         if let Some((mac_s, ip, nickname, trusted, vend, host)) = saved {
             self.known_hosts
                 .upsert(&mac_s, ip, nickname, trusted, vend, host);
-            let _ = self.known_hosts.save();
+            self.save_known_hosts();
         }
         self.set_toast(format!("Updated nickname for {ip}"));
     }

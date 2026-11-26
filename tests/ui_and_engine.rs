@@ -28,7 +28,9 @@ fn demo_app(mode: ScanMode) -> App {
     };
     cfg.theme = ThemeId::Moonveil;
     cfg.accent = AccentId::Violet;
-    App::new(cfg, true, Some("enp6s18"))
+    let mut app = App::new(cfg, true, Some("enp6s18"));
+    app.persist_state = false;
+    app
 }
 
 fn click_action(app: &mut App, action: &ClickAction) {

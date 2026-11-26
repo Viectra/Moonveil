@@ -53,8 +53,11 @@ mvl [OPTIONS]
 ```
 
 - `--demo` — Preview UI with realistic simulated LAN, Docker, and Tailscale telemetry
-- `--iface <NAME>` — Start on a specific Linux interface (`enp6s18`, `wlan0`, `docker0`, etc.)
+- `-i, --iface <NAME>` — Start on a specific Linux interface (`enp6s18`, `wlan0`, `docker0`, etc.)
 - `--normal` / `--advanced` — Start in Normal Mode or Advanced Mode
+- `--preset <PRESET>` — `quick`, `standard`, `full`, `webdev`, `custom`
+- `--ports <EXPR>` — Custom port expression (`22,80,443,8000-8090`)
+- `--watch` — Start with background Watch Mode enabled
 - `--theme <THEME>` — `moonveil`, `obsidian`, `abyss`, `graphite`, `terminal`
 - `--accent <COLOR>` — `violet`, `peach`, `cyan`, `mint`, `rose`, `amber`
 - `--no-splash` — Skip launch emblem animation
